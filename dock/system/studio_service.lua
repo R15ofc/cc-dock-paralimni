@@ -94,6 +94,23 @@ local function normalize_layout(project)
   return project
 end
 
+local function unique_component_id(project, base)
+  base = tostring(base or "component"):gsub("[^%w_%-]", "_")
+  if base == "" then base = "component" end
+  local used = {}
+  for _, component in ipairs(project.components or {}) do used[tostring(component.id or "")] = true end
+  if not used[base] then return base end
+  local index = 2
+  while used[base .. tostring(index)] do index = index + 1 end
+  return base .. tostring(index)
+end
+
+local function clone_component(component)
+  local clone = {}
+  for key, value in pairs(component or {}) do clone[key] = value end
+  return clone
+end
+
 local function parse_components(script)
   local components = {}
   local seen_ui = false
@@ -297,6 +314,7 @@ function M.new(ctx)
       preview_scroll_x = 0,
       preview_scroll_y = 0,
       code_scroll = 0,
+      panel_scroll = 0,
       mode = "design",
       tool = "move",
       insert_kind = "button",
@@ -315,6 +333,7 @@ function M.new(ctx)
     service.project.mode = service.project.mode or "design"
     service.project.tool = service.project.tool or "move"
     service.project.insert_kind = service.project.insert_kind or "button"
+    service.project.panel_scroll = math.max(0, tonumber(service.project.panel_scroll) or 0)
     return ok(service.project)
   end
 
@@ -420,6 +439,13 @@ function M.new(ctx)
     return ok({ x = project.preview_scroll_x, y = project.preview_scroll_y })
   end
 
+  function service.scrollPanel(delta, max_offset)
+    local project = service.current().data
+    local max_scroll = math.max(0, tonumber(max_offset) or 9999)
+    project.panel_scroll = math.max(0, math.min(max_scroll, (tonumber(project.panel_scroll) or 0) + ((tonumber(delta) or 0) * 10)))
+    return ok(project.panel_scroll)
+  end
+
   function service.scrollCode(delta)
     local project = service.current().data
     project.code_scroll = math.max(0, (tonumber(project.code_scroll) or 0) + (tonumber(delta) or 0))
@@ -486,6 +512,40 @@ function M.new(ctx)
     return service.setScript(table.concat(lines, "\n") .. "\n")
   end
 
+  function service.deleteSelected()
+    local project = service.current().data
+    local index = tonumber(project.selected) or -1
+    if not project.components[index] then return err("component not found", "NOT_FOUND") end
+    table.remove(project.components, index)
+    project.selected = math.min(math.max(1, index), math.max(1, #project.components))
+    project.dirty = true
+    return ok(refresh(project))
+  end
+
+  function service.duplicateSelected()
+    local project = service.current().data
+    local index = tonumber(project.selected) or -1
+    local component = project.components[index]
+    if not component then return err("component not found", "NOT_FOUND") end
+    local clone = clone_component(component)
+    clone.id = unique_component_id(project, tostring(component.id or component.kind or "component") .. "_copy")
+    clone.x = (tonumber(component.x) or 1) + 8
+    clone.y = (tonumber(component.y) or 1) + 8
+    clamp_component(project, clone)
+    table.insert(project.components, index + 1, clone)
+    project.selected = index + 1
+    project.dirty = true
+    return ok(refresh(project))
+  end
+
+  function service.nudgeSelected(dx, dy)
+    local project = service.current().data
+    local index = tonumber(project.selected) or -1
+    local component = project.components[index]
+    if not component then return err("component not found", "NOT_FOUND") end
+    return service.moveComponent(index, (tonumber(component.x) or 1) + (tonumber(dx) or 0), (tonumber(component.y) or 1) + (tonumber(dy) or 0))
+  end
+
   function service.loadExample(name)
     service.project = default_project()
     local project = service.project
@@ -521,6 +581,7 @@ function M.new(ctx)
     project.mode = "design"
     project.tool = "move"
     project.insert_kind = "button"
+    project.panel_scroll = 0
     project.dirty = true
     return ok(refresh(project))
   end

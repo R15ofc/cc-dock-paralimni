@@ -21,6 +21,16 @@ local function rgb(red, green, blue)
   return red * 65536 + green * 256 + blue
 end
 
+local function intersect_rect(ax, ay, aw, ah, bx, by, bw, bh)
+  ax, ay, aw, ah = math.floor(tonumber(ax) or 1), math.floor(tonumber(ay) or 1), math.floor(tonumber(aw) or 0), math.floor(tonumber(ah) or 0)
+  bx, by, bw, bh = math.floor(tonumber(bx) or 1), math.floor(tonumber(by) or 1), math.floor(tonumber(bw) or 0), math.floor(tonumber(bh) or 0)
+  if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0 then return nil end
+  local x1, y1 = math.max(ax, bx), math.max(ay, by)
+  local x2, y2 = math.min(ax + aw - 1, bx + bw - 1), math.min(ay + ah - 1, by + bh - 1)
+  if x2 < x1 or y2 < y1 then return nil end
+  return x1, y1, x2 - x1 + 1, y2 - y1 + 1
+end
+
 local COLORS = {
   black = rgb(0, 0, 0),
   white = rgb(245, 245, 245),
@@ -42,6 +52,7 @@ local function safe_print(line)
 end
 
 local GPU_SIZE_CACHE = setmetatable({}, { __mode = "k" })
+local GPU_CLIP_STACK = setmetatable({}, { __mode = "k" })
 
 local function gpu_size(gpu)
   if not gpu or not gpu.getSize then return nil, nil end
@@ -55,10 +66,47 @@ local function gpu_size(gpu)
   return nil, nil
 end
 
+local function current_clip(gpu)
+  local stack = type(gpu) == "table" and GPU_CLIP_STACK[gpu] or nil
+  return stack and stack[#stack] or nil
+end
+
+local function push_clip(gpu, x, y, width, height)
+  if type(gpu) ~= "table" then return end
+  local stack = GPU_CLIP_STACK[gpu]
+  if not stack then stack = {}; GPU_CLIP_STACK[gpu] = stack end
+  local parent = stack[#stack]
+  if parent then
+    local ix, iy, iw, ih = intersect_rect(parent.x, parent.y, parent.w, parent.h, x, y, width, height)
+    table.insert(stack, ix and { x = ix, y = iy, w = iw, h = ih } or { x = 1, y = 1, w = 0, h = 0 })
+  else
+    table.insert(stack, { x = math.floor(x), y = math.floor(y), w = math.floor(width), h = math.floor(height) })
+  end
+end
+
+local function pop_clip(gpu)
+  local stack = type(gpu) == "table" and GPU_CLIP_STACK[gpu] or nil
+  if stack and #stack > 0 then table.remove(stack) end
+end
+
 local function draw_text(gpu, x, y, text, fg, bg)
   if not gpu or not gpu.drawText then return end
   x, y = math.floor(tonumber(x) or 1), math.floor(tonumber(y) or 1)
   text = tostring(text or "")
+  local clip = current_clip(gpu)
+  if clip then
+    if clip.w <= 0 or clip.h <= 0 or y + CELL_H - 1 < clip.y or y > clip.y + clip.h - 1 then return end
+    local right = clip.x + clip.w - 1
+    if x > right then return end
+    if x < clip.x then
+      local skip = math.max(0, math.ceil((clip.x - x) / CELL_W))
+      text = text:sub(skip + 1)
+      x = x + (skip * CELL_W)
+    end
+    local max_chars = math.max(0, math.floor((right - x + CELL_W) / CELL_W))
+    if #text > max_chars then text = text:sub(1, max_chars) end
+    if text == "" then return end
+  end
   local screen_w, screen_h = gpu_size(gpu)
   if screen_h and (y < 1 or y > screen_h) then return end
   if screen_w then
@@ -77,6 +125,12 @@ end
 local function rect(gpu, x, y, width, height, color)
   if not gpu or width <= 0 or height <= 0 then return end
   x, y, width, height = math.floor(x), math.floor(y), math.floor(width), math.floor(height)
+  local clip = current_clip(gpu)
+  if clip then
+    local ix, iy, iw, ih = intersect_rect(x, y, width, height, clip.x, clip.y, clip.w, clip.h)
+    if not ix then return end
+    x, y, width, height = ix, iy, iw, ih
+  end
   local screen_w, screen_h = gpu_size(gpu)
   if screen_w and screen_h then
     local x2 = math.min(screen_w, x + width - 1)
@@ -517,6 +571,12 @@ function M.new(ctx)
   local function add_hit(ui, id, x, y, w, h, payload)
     x, y, w, h = math.floor(tonumber(x) or 1), math.floor(tonumber(y) or 1), math.floor(tonumber(w) or 0), math.floor(tonumber(h) or 0)
     if w <= 0 or h <= 0 then return end
+    local active_clip = ui.hit_clip and ui.hit_clip[#ui.hit_clip]
+    if active_clip then
+      local ix, iy, iw, ih = intersect_rect(x, y, w, h, active_clip.x, active_clip.y, active_clip.w, active_clip.h)
+      if not ix then return end
+      x, y, w, h = ix, iy, iw, ih
+    end
     local x2 = math.min(ui.width or x + w - 1, x + w - 1)
     local y2 = math.min(ui.height or y + h - 1, y + h - 1)
     x = math.max(1, x)
@@ -525,6 +585,24 @@ function M.new(ctx)
     h = y2 - y + 1
     if w <= 0 or h <= 0 then return end
     table.insert(ui.hits, { id = id, x = x, y = y, w = w, h = h, payload = payload })
+  end
+
+  local function push_ui_clip(ui, x, y, w, h)
+    push_clip(ui.gpu, x, y, w, h)
+    ui.hit_clip = ui.hit_clip or {}
+    local parent = ui.hit_clip[#ui.hit_clip]
+    local ix, iy, iw, ih
+    if parent then
+      ix, iy, iw, ih = intersect_rect(parent.x, parent.y, parent.w, parent.h, x, y, w, h)
+    else
+      ix, iy, iw, ih = intersect_rect(1, 1, ui.width or 1, ui.height or 1, x, y, w, h)
+    end
+    table.insert(ui.hit_clip, ix and { x = ix, y = iy, w = iw, h = ih } or { x = 1, y = 1, w = 0, h = 0 })
+  end
+
+  local function pop_ui_clip(ui)
+    pop_clip(ui.gpu)
+    if ui.hit_clip and #ui.hit_clip > 0 then table.remove(ui.hit_clip) end
   end
 
   local function sync_windows(ui)
@@ -1348,7 +1426,13 @@ function M.new(ctx)
         end
       else
         draw_text(ui.gpu, content_x + 8, body_y + 4, "Design", rgb(205, 226, 255), -1)
-        local tool_y = body_y + 18
+        local panel_x, panel_y = content_x, body_y + 15
+        local panel_w, panel_h = side_w, math.max(1, body_h - 15)
+        local panel_scroll = math.max(0, tonumber(project.panel_scroll) or 0)
+        ui.studio_panel_metrics = { x = panel_x, y = panel_y, w = panel_w, h = panel_h, max = 0 }
+        add_hit(ui, "studio_panel", panel_x, panel_y, panel_w, panel_h, { window_id = window.id })
+        push_ui_clip(ui, panel_x, panel_y, panel_w, panel_h)
+        local tool_y = panel_y + 3 - panel_scroll
         local tools = {
           { label = "Move", tool = "move" },
           { label = "Add", tool = "add", kind = project.insert_kind or "button" },
@@ -1373,6 +1457,7 @@ function M.new(ctx)
           add_hit(ui, "studio_tool", kx, kind_y, bw, 12, { tool = "add", kind = kind })
           kx = kx + bw + 4
         end
+        local panel_end_y = kind_y + 13
         if selected then
           local prop_y = kind_y + 18
           draw_text(ui.gpu, content_x + 6, prop_y, ellipsize((selected.kind or "node") .. " " .. (selected.id or ""), math.floor((side_w - 12) / 6)), COLORS.white, -1)
@@ -1398,32 +1483,53 @@ function M.new(ctx)
             add_hit(ui, "studio_resize", sx, sy, 18, 11, { index = project.selected, dw = control.dw, dh = control.dh })
             sx = sx + 21
           end
-          local example_y = sy + 15
-          if example_y + 24 <= body_y + body_h then
-            draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
-            local ex_x = content_x + 6
-            local examples = {
-              { label = "Notify", payload = "notify" },
-              { label = "Counter", payload = "counter" },
-              { label = "Duo", payload = "duo" },
-            }
-            for _, example in ipairs(examples) do
-              local bw = math.max(24, #example.label * 6 + 8)
-              if ex_x + bw > content_x + side_w - 4 then break end
-              small_round(ui.gpu, ex_x, example_y + 12, bw, 11, rgb(49, 55, 66))
-              draw_text(ui.gpu, ex_x + 4, example_y + 14, example.label, COLORS.white, -1)
-              add_hit(ui, "studio_example", ex_x, example_y + 12, bw, 12, example.payload)
-              ex_x = ex_x + bw + 4
-            end
+          local action_y = sy + 15
+          draw_text(ui.gpu, content_x + 6, action_y, "Object", rgb(205, 226, 255), -1)
+          local ax = content_x + 6
+          local actions = {
+            { id = "studio_duplicate", label = "Dupe" },
+            { id = "studio_delete", label = "Del" },
+          }
+          for _, action in ipairs(actions) do
+            small_round(ui.gpu, ax, action_y + 12, 31, 11, action.id == "studio_delete" and COLORS.red or rgb(49, 55, 66))
+            draw_text(ui.gpu, ax + 4, action_y + 14, action.label, COLORS.white, -1)
+            add_hit(ui, action.id, ax, action_y + 12, 31, 12, project.selected)
+            ax = ax + 35
           end
+          panel_end_y = action_y + 27
+          local example_y = panel_end_y + 8
+          draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
+          local ex_x = content_x + 6
+          local examples = {
+            { label = "Notify", payload = "notify" },
+            { label = "Counter", payload = "counter" },
+            { label = "Duo", payload = "duo" },
+          }
+          for _, example in ipairs(examples) do
+            local bw = math.max(24, #example.label * 6 + 8)
+            if ex_x + bw > content_x + side_w - 4 then ex_x = content_x + 6; example_y = example_y + 13 end
+            small_round(ui.gpu, ex_x, example_y + 12, bw, 11, rgb(49, 55, 66))
+            draw_text(ui.gpu, ex_x + 4, example_y + 14, example.label, COLORS.white, -1)
+            add_hit(ui, "studio_example", ex_x, example_y + 12, bw, 12, example.payload)
+            ex_x = ex_x + bw + 4
+          end
+          panel_end_y = example_y + 25
         else
           local example_y = kind_y + 18
-          if example_y + 24 <= body_y + body_h then
-            draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
-            small_round(ui.gpu, content_x + 6, example_y + 12, 44, 11, rgb(49, 55, 66))
-            draw_text(ui.gpu, content_x + 10, example_y + 14, "Notify", COLORS.white, -1)
-            add_hit(ui, "studio_example", content_x + 6, example_y + 12, 44, 12, "notify")
-          end
+          draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
+          small_round(ui.gpu, content_x + 6, example_y + 12, 44, 11, rgb(49, 55, 66))
+          draw_text(ui.gpu, content_x + 10, example_y + 14, "Notify", COLORS.white, -1)
+          add_hit(ui, "studio_example", content_x + 6, example_y + 12, 44, 12, "notify")
+          panel_end_y = example_y + 25
+        end
+        pop_ui_clip(ui)
+        local content_height = math.max(1, panel_end_y + panel_scroll - panel_y + 4)
+        local max_panel_scroll = math.max(0, content_height - panel_h)
+        ui.studio_panel_metrics.max = max_panel_scroll
+        project.panel_scroll = math.min(panel_scroll, max_panel_scroll)
+        if max_panel_scroll > 0 then
+          local metrics = scrollbar.metrics(content_height, panel_h, project.panel_scroll, content_x + side_w - 5, panel_y, panel_h)
+          scrollbar.draw(ui.gpu, metrics, { track = rgb(30, 34, 42), thumb = rgb(90, 102, 122) })
         end
       end
     end
@@ -1506,6 +1612,7 @@ function M.new(ctx)
     add_hit(ui, "window_full", x + 24, y + 4, 10, 10, window.id)
     local app_id = window.app_id
     local content_x, content_y = x + 10, y + 22
+    push_ui_clip(ui, x + 1, y + 18, w - 2, h - 19)
     if app_id == "dock.files" then
       draw_explorer(ui, window, x, y, w, h)
     elseif app_id == "dock.settings" then
@@ -1520,6 +1627,7 @@ function M.new(ctx)
         draw_text(ui.gpu, content_x, content_y, window.app.manifest.name, COLORS.white, -1)
       end
     end
+    pop_ui_clip(ui)
   end
 
   local function render(ui)
@@ -1527,6 +1635,7 @@ function M.new(ctx)
     ui.hits = {}
     local update_status = ctx.update_service and ctx.update_service.status().data.status or "idle"
     if ctx.cursor_service then ctx.cursor_service.setBusy("dock.settings", update_status == "checking" or update_status == "installing") end
+    ui.studio_panel_metrics = nil
     draw_wallpaper(ui)
     draw_top(ui)
     for _, window in ipairs(ui.windows) do draw_window(ui, window) end
@@ -1684,6 +1793,8 @@ function M.new(ctx)
     elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
     elseif hit.id == "studio_insert" then ctx.studio_service.setMode("design"); ctx.studio_service.setTool("add", hit.payload)
     elseif hit.id == "studio_tool" then ctx.studio_service.setTool(hit.payload.tool, hit.payload.kind)
+    elseif hit.id == "studio_duplicate" then ctx.studio_service.duplicateSelected()
+    elseif hit.id == "studio_delete" then ctx.studio_service.deleteSelected()
     elseif hit.id == "studio_resize" then ctx.studio_service.resizeComponent(hit.payload.index, hit.payload.dw, hit.payload.dh)
     elseif hit.id == "studio_prop_field" then
       local id = focus_text_input(ui, "studio_prop", hit.payload.window_id, hit.payload.value or "", #tostring(hit.payload.value or ""), { field = hit.payload.field })
@@ -1859,6 +1970,15 @@ function M.new(ctx)
         if started.ok then focus_text_input(ui, "explorer_rename", window.id, started.data.value or "", #tostring(started.data.value or "")); return true end
       end
     end
+    local window = active_window(ui)
+    if window and window.app_id == "dock.studio" then
+      if ui.modifiers.ctrl and key == keys.d then ctx.studio_service.duplicateSelected(); return true end
+      if key == keys.delete or key == keys.backspace then ctx.studio_service.deleteSelected(); return true end
+      if key == keys.left then ctx.studio_service.nudgeSelected(-1, 0); return true end
+      if key == keys.right then ctx.studio_service.nudgeSelected(1, 0); return true end
+      if key == keys.up then ctx.studio_service.nudgeSelected(0, -1); return true end
+      if key == keys.down then ctx.studio_service.nudgeSelected(0, 1); return true end
+    end
     return false
   end
 
@@ -1888,6 +2008,11 @@ function M.new(ctx)
 
   local function handle_scroll(ui, button, x, y)
     local hit = hit_at(ui, x, y)
+    local panel = ui.studio_panel_metrics
+    if panel and x >= panel.x and x <= panel.x + panel.w - 1 and y >= panel.y and y <= panel.y + panel.h - 1 then
+      ctx.studio_service.scrollPanel(button or 0, panel.max or 0)
+      return true
+    end
     if hit and (hit.id == "studio_code_panel" or hit.id == "studio_code_line") then
       ctx.studio_service.scrollCode(button or 0)
       return true

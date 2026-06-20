@@ -27,6 +27,33 @@ local function draw_text(gpu, x, y, text, color)
   if gpu and gpu.drawText then pcall(gpu.drawText, math.floor(x), math.floor(y), tostring(text or ""), color or WHITE, -1, 1, 0) end
 end
 
+local function centered_lines(text, max_chars)
+  text = tostring(text or "")
+  max_chars = math.max(1, tonumber(max_chars) or #text)
+  local lines, line = {}, ""
+  for word in text:gmatch("%S+") do
+    if line == "" then
+      line = word
+    elseif #line + #word + 1 <= max_chars then
+      line = line .. " " .. word
+    else
+      table.insert(lines, line)
+      line = word
+    end
+  end
+  if line ~= "" then table.insert(lines, line) end
+  if #lines == 0 then table.insert(lines, text) end
+  return lines
+end
+
+local function draw_centered_text(gpu, width, y, text, color)
+  local max_chars = math.max(1, math.floor((width - 18) / 6))
+  for index, line in ipairs(centered_lines(text, max_chars)) do
+    local x = math.max(1, math.floor((width - (#line * 6)) / 2))
+    draw_text(gpu, x, y + ((index - 1) * 10), line, color)
+  end
+end
+
 local function gpu_size(gpu)
   local width, height = 384, 192
   if gpu and gpu.refreshSize then pcall(gpu.refreshSize) end
@@ -73,7 +100,7 @@ function M.draw(gpu, options)
   rect(gpu, bar_x, bar_y, math.max(1, math.floor(bar_width * math.max(0, math.min(100, options.progress or 0)) / 100)), bar_height, WHITE)
 
   if options.message and options.message ~= "" then
-    draw_text(gpu, math.max(1, math.floor((width - (#options.message * 6)) / 2)), bar_y + 14, options.message, WHITE)
+    draw_centered_text(gpu, width, bar_y + 14, options.message, WHITE)
   end
   if gpu.sync then pcall(gpu.sync) end
 end
