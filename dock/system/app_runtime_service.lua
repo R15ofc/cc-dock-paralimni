@@ -154,6 +154,8 @@ function M.new(ctx)
         createFile = function(first, second, third) return app_ctx.fs.write(path_arg(first, second), data_arg(first, second, third) or "") end,
       },
       settings = {},
+      storage = {},
+      events = {},
       ipc = {},
       notification = {},
       process = {},
@@ -186,6 +188,22 @@ function M.new(ctx)
         exportApp = function() return ctx.studio_service.exportApp() end,
       },
     }
+
+    local function storage_path()
+      return paths.join(app_data_dir(app_id), "storage.json")
+    end
+
+    local function read_storage()
+      local allowed = check_permission(app_id, "storage.app")
+      if not allowed.ok then return allowed end
+      return safe_io.readJson(storage_path(), {})
+    end
+
+    local function write_storage(value)
+      local allowed = check_permission(app_id, "storage.app")
+      if not allowed.ok then return allowed end
+      return safe_io.writeJson(storage_path(), value or {})
+    end
 
     function app_ctx.settings.get(key, default)
       local allowed = check_permission(app_id, "settings.read")
@@ -225,6 +243,45 @@ function M.new(ctx)
       return ctx.notification_service.add(title or manifest.name, body or "", app_id)
     end
 
+    function app_ctx.storage.get(key, default)
+      local current = read_storage()
+      if not current.ok then return current end
+      local value = current.data[tostring(key or "")]
+      if value == nil then value = default end
+      return ok(value)
+    end
+
+    function app_ctx.storage.set(key, value)
+      local current = read_storage()
+      if not current.ok then return current end
+      current.data[tostring(key or "")] = value
+      return write_storage(current.data)
+    end
+
+    function app_ctx.storage.delete(key)
+      local current = read_storage()
+      if not current.ok then return current end
+      current.data[tostring(key or "")] = nil
+      return write_storage(current.data)
+    end
+
+    function app_ctx.storage.all()
+      return read_storage()
+    end
+
+    function app_ctx.events.emit(kind, payload)
+      local event_payload = payload or {}
+      if type(event_payload) ~= "table" then event_payload = { value = event_payload } end
+      event_payload.app_id = event_payload.app_id or app_id
+      event_payload.kind = kind or event_payload.kind or "event"
+      if ctx.process_manager and ctx.process_manager.dispatch then return ctx.process_manager.dispatch("dock_app_event", event_payload) end
+      return ok(false)
+    end
+
+    function app_ctx.events.onAny()
+      return coroutine.yield("*")
+    end
+
     function app_ctx.process.launch(target_app_id, args)
       local allowed = check_permission(app_id, "process.spawn")
       if not allowed.ok then return allowed end
@@ -242,6 +299,10 @@ function M.new(ctx)
       get = function(id) return ctx.text_input_service.get(app_id .. ":" .. tostring(id or "input")) end,
       set = function(id, value, cursor) return ctx.text_input_service.set(app_id .. ":" .. tostring(id or "input"), value, cursor) end,
     }
+
+    app_ctx.ui.notify = function(body, title) return app_ctx.notification.send(title or manifest.name, body or "") end
+    app_ctx.ui.emit = function(kind, payload) return app_ctx.events.emit(kind, payload) end
+    app_ctx.ui.launch = function(target_app_id, args) return app_ctx.process.launch(target_app_id, args or {}) end
 
     return app_ctx
   end

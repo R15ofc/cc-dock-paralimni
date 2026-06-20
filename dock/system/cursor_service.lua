@@ -1,88 +1,9 @@
 local loading = require("dock.system.loading")
+local cursor_pack = require("dock.system.cursor_pack")
 
 local M = {}
 
 local function ok(data) return { ok = true, data = data } end
-
-local function rgb(red, green, blue)
-  red = math.max(0, math.min(255, math.floor(red or 0)))
-  green = math.max(0, math.min(255, math.floor(green or 0)))
-  blue = math.max(0, math.min(255, math.floor(blue or 0)))
-  return red * 65536 + green * 256 + blue
-end
-
-local WHITE = rgb(255, 255, 255)
-local BLACK = rgb(0, 0, 0)
-local RED = rgb(255, 59, 48)
-local BLUE = rgb(0, 122, 255)
-
-local function rect(gpu, x, y, width, height, color)
-  if not gpu or width <= 0 or height <= 0 then return end
-  x, y, width, height = math.floor(x), math.floor(y), math.floor(width), math.floor(height)
-  if gpu.filledRectangle and pcall(gpu.filledRectangle, x, y, width, height, color) then return end
-  local red = math.floor(color / 65536) % 256
-  local green = math.floor(color / 256) % 256
-  local blue = color % 256
-  if gpu.fillRect then pcall(gpu.fillRect, x, y, width, height, red, green, blue) end
-end
-
-local function draw_text(gpu, x, y, text, fg, bg)
-  if gpu and gpu.drawText then pcall(gpu.drawText, math.floor(x), math.floor(y), tostring(text or ""), fg or WHITE, bg or -1, 1, 0) end
-end
-
-local function draw_arrow(gpu, x, y)
-  local points = {
-    { 0, 0 }, { 0, 1 }, { 0, 2 }, { 0, 3 }, { 0, 4 }, { 0, 5 }, { 0, 6 }, { 0, 7 },
-    { 1, 1 }, { 1, 2 }, { 1, 3 }, { 1, 4 }, { 1, 5 }, { 1, 6 },
-    { 2, 2 }, { 2, 3 }, { 2, 4 }, { 2, 5 },
-    { 3, 3 }, { 3, 4 }, { 3, 5 },
-    { 4, 4 }, { 4, 5 },
-    { 5, 5 },
-  }
-  for _, point in ipairs(points) do rect(gpu, x + point[1], y + point[2], 1, 1, BLACK) end
-  for _, point in ipairs(points) do rect(gpu, x + point[1] + 1, y + point[2], 1, 1, WHITE) end
-end
-
-local function draw_hand(gpu, x, y)
-  rect(gpu, x + 6, y + 1, 3, 8, WHITE)
-  rect(gpu, x + 5, y + 2, 5, 2, BLACK)
-  rect(gpu, x + 3, y + 7, 9, 7, WHITE)
-  rect(gpu, x + 2, y + 8, 2, 5, BLACK)
-  rect(gpu, x + 11, y + 8, 2, 5, BLACK)
-  rect(gpu, x + 4, y + 14, 7, 2, BLACK)
-  rect(gpu, x + 4, y + 7, 2, 4, WHITE)
-  rect(gpu, x + 8, y + 7, 2, 4, WHITE)
-end
-
-local function draw_ibeam(gpu, x, y)
-  rect(gpu, x + 6, y + 2, 1, 12, BLACK)
-  rect(gpu, x + 3, y + 2, 7, 1, BLACK)
-  rect(gpu, x + 3, y + 13, 7, 1, BLACK)
-  rect(gpu, x + 7, y + 2, 1, 12, WHITE)
-  rect(gpu, x + 4, y + 1, 7, 1, WHITE)
-  rect(gpu, x + 4, y + 14, 7, 1, WHITE)
-end
-
-local function draw_denied(gpu, x, y)
-  rect(gpu, x + 8, y + 9, 8, 2, RED)
-  rect(gpu, x + 7, y + 10, 2, 5, RED)
-  rect(gpu, x + 15, y + 10, 2, 5, RED)
-  rect(gpu, x + 8, y + 15, 8, 2, RED)
-  rect(gpu, x + 9, y + 14, 6, 1, RED)
-end
-
-local function draw_drag(gpu, x, y)
-  rect(gpu, x + 8, y + 10, 8, 2, BLUE)
-  rect(gpu, x + 11, y + 7, 2, 8, BLUE)
-  rect(gpu, x + 7, y + 9, 2, 4, BLUE)
-  rect(gpu, x + 15, y + 9, 2, 4, BLUE)
-end
-
-local function draw_click(gpu, x, y)
-  rect(gpu, x + 9, y + 10, 5, 5, BLUE)
-  rect(gpu, x + 8, y + 11, 7, 3, BLUE)
-  rect(gpu, x + 10, y + 9, 3, 7, BLUE)
-end
 
 function M.new()
   local service = {
@@ -136,12 +57,7 @@ function M.new()
     if not service.visible then return ok(false) end
     kind = kind or service.kind or "default"
     local x, y = service.x, service.y
-    if kind == "click" then draw_hand(gpu, x, y)
-    elseif kind == "text" then draw_ibeam(gpu, x, y)
-    else draw_arrow(gpu, x, y) end
-    if kind == "drag" then draw_drag(gpu, x, y)
-    elseif kind == "denied" then draw_denied(gpu, x, y)
-    elseif kind == "loading" then draw_text(gpu, x + 8, y + 9, loading.spinner(frame), WHITE, BLACK) end
+    cursor_pack.draw(gpu, kind, x, y, frame, loading.spinner(frame))
     return ok(kind)
   end
 

@@ -1,5 +1,7 @@
 local paths = require("dock.system.paths")
 local json = require("dock.system.json")
+local animation = require("dock.system.animation")
+local cursor_pack = require("dock.system.cursor_pack")
 local loading = require("dock.system.loading")
 local scrollbar = require("dock.system.scrollbar")
 local splash = require("dock.system.splash")
@@ -95,6 +97,8 @@ return {
     local restored_explorer = trashed.ok and ctx.fs_service.restoreFromTrash(trashed.data.id)
     check("explorer trash/restore", restored_explorer and restored_explorer.ok and fs.exists(moved.data))
     check("loading helper", loading.spinner(0) == "|" and loading.progress(50, 4):match("^##%-%-") ~= nil)
+    check("animation helper", animation.dockBounce(3, true) >= 0)
+    check("cursor pack", #cursor_pack.kinds() >= 5)
     local scroll_metrics = scrollbar.metrics(10, 4, 2, 1, 1, 40)
     check("scrollbar helper", scroll_metrics.enabled and scrollbar.offsetFromY(scroll_metrics, scroll_metrics.thumb_y) >= 0)
     local fake_gpu = {
@@ -125,6 +129,7 @@ return {
     ctx.app_service.scanApps()
     local studio_app_id = ctx.studio_service.current().data.id
     check("app bundle registry", ctx.app_service.getApp(studio_app_id).ok)
+    check("app bundle permissions", ctx.permission_service.check(studio_app_id, "storage.app").data == true and ctx.permission_service.check(studio_app_id, "notification.send").data == true)
     local studio_runtime = ctx.app_runtime_service.launch(studio_app_id, {})
     if studio_runtime.ok then ctx.process_manager.dispatch("dock_app_event", { app_id = studio_app_id, kind = "button", action = "notify", message = "Selftest event" }) end
     check("app bundle runtime", studio_runtime.ok and ctx.notification_service.recentForApp(studio_app_id, 5).data ~= nil)

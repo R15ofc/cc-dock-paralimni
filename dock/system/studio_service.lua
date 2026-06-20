@@ -84,7 +84,7 @@ function M.new(ctx)
       name = "Paralimni App",
       version = "0.0.1",
       icon = "placeholder",
-      permissions = { "fs.read", "notification.send", "settings.read", "settings.write" },
+      permissions = { "fs.read", "notification.send", "settings.read", "settings.write", "storage.app" },
       window = { w = 220, h = 120 },
       preview_scroll_x = 0,
       preview_scroll_y = 0,

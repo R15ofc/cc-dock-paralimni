@@ -1,5 +1,6 @@
 local paths = require("dock.system.paths")
 local tom = require("dock.system.tom_adapter")
+local animation = require("dock.system.animation")
 local loading = require("dock.system.loading")
 local scrollbar = require("dock.system.scrollbar")
 
@@ -146,14 +147,24 @@ local function image_from_file(gpu, path, cache)
   return nil
 end
 
-local function pixel_event(event, a, b, c, d)
-  if event == "mouse_scroll" then
-    return event, a or 0, ((b or 1) - 1) * CELL_W + 1, ((c or 1) - 1) * CELL_H + 1
-  end
-  if event == "tm_monitor_mouse_scroll" then
-    if type(a) == "string" then return "mouse_scroll", b or 0, c or 1, d or 1 end
-    return "mouse_scroll", a or 0, b or 1, c or 1
-  end
+  local function pixel_event(event, a, b, c, d)
+    if event == "mouse_scroll" then
+      return event, a or 0, ((b or 1) - 1) * CELL_W + 1, ((c or 1) - 1) * CELL_H + 1
+    end
+    if event == "tm_monitor_mouse_scroll" then
+      if type(a) == "string" then
+        if b == -1 then return "mouse_scroll", b, c or 1, d or 1 end
+        if type(d) == "number" and math.abs(d) <= 3 then
+          return "mouse_scroll", d, b or 1, c or 1
+        end
+        return "mouse_scroll", b or 0, c or 1, d or 1
+      end
+      if a == -1 then return "mouse_scroll", a, b or 1, c or 1 end
+      if type(c) == "number" and math.abs(c) <= 3 then
+        return "mouse_scroll", c, a or 1, b or 1
+      end
+      return "mouse_scroll", a or 0, b or 1, c or 1
+    end
   if event == "mouse_click" or event == "mouse_drag" or event == "mouse_up" then
     return event, a or 1, ((b or 1) - 1) * CELL_W + 1, ((c or 1) - 1) * CELL_H + 1
   end
@@ -621,6 +632,7 @@ function M.new(ctx)
     if ctx.notification_service and ctx.notification_service.recentForApp then
       local recent = ctx.notification_service.recentForApp(app_id, 2.2)
       state.notify = recent.ok and recent.data ~= nil
+      if state.notify and recent.data and recent.data.time then state.notify_age = (os.clock and os.clock() or 0) - recent.data.time end
     end
     return state
   end
@@ -634,7 +646,7 @@ function M.new(ctx)
 
   local function draw_icon_square(ui, x, y, app, active)
     local state = dock_state_for_app(ui, app.manifest.id)
-    local bounce = (state.loading or state.notify) and math.max(0, math.floor(2 + math.sin((ui.frame or 0) * 0.9) * 2)) or 0
+    local bounce = animation.dockBounce(ui.frame or 0, state.loading, state.notify_age)
     y = y - bounce
     small_round(ui.gpu, x, y, 16, 16, active and COLORS.blue or COLORS.red)
     local icon = app.manifest.icon
@@ -1497,11 +1509,26 @@ function M.new(ctx)
     return false
   end
 
+  local function handle_scroll(ui, button, x, y)
+    local hit = hit_at(ui, x, y)
+    if hit and hit.id == "studio_preview" then
+      if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
+      return true
+    end
+    local window = active_window(ui)
+    if window and window.app_id == "dock.settings" then settings_scroll(ui, button); return true end
+    if window and window.app_id == "dock.studio" then
+      if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
+      return true
+    end
+    return false
+  end
+
   local function run_graphical(gpu, width, height)
     local ui = initial_ui_state(gpu, width, height)
     while true do
       render(ui)
-      if needs_animation(ui) and os.startTimer then os.startTimer(0.25) end
+      if needs_animation(ui) and os.startTimer then os.startTimer(animation.timerInterval(true)) end
       local event, a, b, c, d = os.pullEvent()
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
       if handle_modifier_key(ui, event, a, b) then
@@ -1551,11 +1578,7 @@ function M.new(ctx)
           ui.dragging_text = nil
           ui.selecting = nil
         elseif mapped == "mouse_scroll" then
-          local window = active_window(ui)
-          if window and window.app_id == "dock.settings" then settings_scroll(ui, button) end
-          if window and window.app_id == "dock.studio" then
-            if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
-          end
+          handle_scroll(ui, button, x, y)
         elseif mapped == "peripheral" or mapped == "peripheral_detach" then
           ctx.device_service.scan()
         end
