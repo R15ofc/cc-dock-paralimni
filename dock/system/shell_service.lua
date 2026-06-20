@@ -183,6 +183,28 @@ local function small_round(gpu, x, y, width, height, color)
   rect(gpu, x + 1, y + 1, width - 2, height - 2, color)
 end
 
+local function ease_out_cubic(value)
+  value = math.max(0, math.min(1, tonumber(value) or 0))
+  return 1 - ((1 - value) * (1 - value) * (1 - value))
+end
+
+local function filled_circle(gpu, center_x, center_y, radius, color)
+  radius = math.max(1, math.floor(tonumber(radius) or 1))
+  center_x, center_y = math.floor(center_x), math.floor(center_y)
+  for dy = -radius, radius do
+    local dx = math.floor(math.sqrt(math.max(0, radius * radius - dy * dy)))
+    rect(gpu, center_x - dx, center_y + dy, dx * 2 + 1, 1, color)
+  end
+end
+
+local function draw_profile_avatar(gpu, center_x, center_y, radius)
+  filled_circle(gpu, center_x, center_y, radius, rgb(252, 252, 255))
+  filled_circle(gpu, center_x, center_y, math.max(1, radius - 2), rgb(226, 231, 240))
+  filled_circle(gpu, center_x, center_y - math.floor(radius * 0.25), math.max(3, math.floor(radius * 0.24)), rgb(96, 105, 122))
+  filled_circle(gpu, center_x, center_y + math.floor(radius * 0.38), math.max(5, math.floor(radius * 0.43)), rgb(96, 105, 122))
+  rect(gpu, center_x - radius + 2, center_y + math.floor(radius * 0.52), (radius * 2) - 3, math.max(2, math.floor(radius * 0.32)), rgb(226, 231, 240))
+end
+
 local function glyph_close(gpu, x, y, color)
   rect(gpu, x + 2, y + 2, 1, 1, color); rect(gpu, x + 3, y + 3, 1, 1, color)
   rect(gpu, x + 4, y + 4, 1, 1, color); rect(gpu, x + 5, y + 5, 1, 1, color)
@@ -1809,22 +1831,19 @@ function M.new(ctx)
   function draw_login(ui)
     ui.hits = {}
     draw_wallpaper(ui)
-    rect(ui.gpu, 1, 1, ui.width, ui.height, rgb(0, 0, 0))
     local profile = ctx.user_service.profile().data
     local name = tostring(profile.name or "Default User")
     local cx = math.floor(ui.width / 2)
-    local avatar = math.max(28, math.min(42, math.floor(ui.height * 0.22)))
-    local avatar_x = cx - math.floor(avatar / 2)
-    local avatar_y = math.max(22, math.floor(ui.height * 0.23))
-    rounded_fill(ui.gpu, avatar_x, avatar_y, avatar, avatar, rgb(232, 236, 244))
-    rounded_outline(ui.gpu, avatar_x, avatar_y, avatar, avatar, rgb(255, 255, 255))
-    local initials = name:match("(%w)") or "U"
-    draw_text(ui.gpu, cx - 3, avatar_y + math.floor(avatar / 2) - 4, initials:upper(), rgb(34, 39, 48), -1)
-    draw_center_text(ui, avatar_y + avatar + 10, name, COLORS.white)
+    local progress = ease_out_cubic(math.min(1, math.max(0, ((ui.frame or 1) - 1) / 24)))
+    local lift = math.floor((1 - progress) * math.max(18, math.floor(ui.height * 0.18)))
+    local radius = math.max(15, math.min(22, math.floor(ui.height * 0.115)))
+    local avatar_y = math.max(38, math.floor(ui.height * 0.34)) + lift
+    draw_profile_avatar(ui.gpu, cx, avatar_y, radius)
+    draw_center_text(ui, avatar_y + radius + 10, name, COLORS.white)
     local field_w = math.min(142, math.max(94, math.floor(ui.width * 0.36)))
     local field_h = 16
     local field_x = cx - math.floor(field_w / 2)
-    local field_y = avatar_y + avatar + 25
+    local field_y = avatar_y + radius + 25
     local password = tostring(ui.login and ui.login.password or "")
     small_round(ui.gpu, field_x, field_y, field_w, field_h, rgb(246, 248, 252))
     outline(ui.gpu, field_x, field_y, field_w, field_h, ui.login and ui.login.active and COLORS.blue or rgb(210, 216, 226))
@@ -2181,6 +2200,7 @@ function M.new(ctx)
   local function needs_animation(ui)
     local update = ctx.update_service and ctx.update_service.status().data
     local update_status = update and update.status or "idle"
+    if ui.locked and (ui.frame or 0) < 28 then return true end
     if ui.text_input ~= nil or update_status == "checking" or update_status == "installing" then return true end
     for _, app in ipairs(ctx.app_service.listApps().data or {}) do
       local state = dock_state_for_app(ui, app.manifest.id)
