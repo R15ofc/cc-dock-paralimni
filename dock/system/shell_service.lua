@@ -41,14 +41,52 @@ local function safe_print(line)
   print(tostring(line or ""))
 end
 
+local GPU_SIZE_CACHE = setmetatable({}, { __mode = "k" })
+
+local function gpu_size(gpu)
+  if not gpu or not gpu.getSize then return nil, nil end
+  if type(gpu) == "table" and GPU_SIZE_CACHE[gpu] then return GPU_SIZE_CACHE[gpu][1], GPU_SIZE_CACHE[gpu][2] end
+  local ok, width, height = pcall(gpu.getSize)
+  if ok then
+    width, height = tonumber(width), tonumber(height)
+    if type(gpu) == "table" then GPU_SIZE_CACHE[gpu] = { width, height } end
+    return width, height
+  end
+  return nil, nil
+end
+
 local function draw_text(gpu, x, y, text, fg, bg)
   if not gpu or not gpu.drawText then return end
-  pcall(gpu.drawText, math.floor(x), math.floor(y), tostring(text or ""), fg or COLORS.white, bg or -1, 1, 0)
+  x, y = math.floor(tonumber(x) or 1), math.floor(tonumber(y) or 1)
+  text = tostring(text or "")
+  local screen_w, screen_h = gpu_size(gpu)
+  if screen_h and (y < 1 or y > screen_h) then return end
+  if screen_w then
+    if x > screen_w then return end
+    while x < 1 and #text > 0 do
+      text = text:sub(2)
+      x = x + CELL_W
+    end
+    local max_chars = math.max(0, math.floor((screen_w - x + CELL_W) / CELL_W))
+    if #text > max_chars then text = text:sub(1, max_chars) end
+    if text == "" then return end
+  end
+  pcall(gpu.drawText, x, y, text, fg or COLORS.white, bg or -1, 1, 0)
 end
 
 local function rect(gpu, x, y, width, height, color)
   if not gpu or width <= 0 or height <= 0 then return end
   x, y, width, height = math.floor(x), math.floor(y), math.floor(width), math.floor(height)
+  local screen_w, screen_h = gpu_size(gpu)
+  if screen_w and screen_h then
+    local x2 = math.min(screen_w, x + width - 1)
+    local y2 = math.min(screen_h, y + height - 1)
+    x = math.max(1, x)
+    y = math.max(1, y)
+    width = x2 - x + 1
+    height = y2 - y + 1
+    if width <= 0 or height <= 0 then return end
+  end
   if gpu.filledRectangle and pcall(gpu.filledRectangle, x, y, width, height, color) then return end
   local red = math.floor(color / 65536) % 256
   local green = math.floor(color / 256) % 256
@@ -477,6 +515,15 @@ function M.new(ctx)
   end
 
   local function add_hit(ui, id, x, y, w, h, payload)
+    x, y, w, h = math.floor(tonumber(x) or 1), math.floor(tonumber(y) or 1), math.floor(tonumber(w) or 0), math.floor(tonumber(h) or 0)
+    if w <= 0 or h <= 0 then return end
+    local x2 = math.min(ui.width or x + w - 1, x + w - 1)
+    local y2 = math.min(ui.height or y + h - 1, y + h - 1)
+    x = math.max(1, x)
+    y = math.max(1, y)
+    w = x2 - x + 1
+    h = y2 - y + 1
+    if w <= 0 or h <= 0 then return end
     table.insert(ui.hits, { id = id, x = x, y = y, w = w, h = h, payload = payload })
   end
 
@@ -486,6 +533,18 @@ function M.new(ctx)
   end
 
   local active_window, active_app_id, focus_window
+
+  local function fit_geometry(ui, geometry)
+    local usable_w = math.max(64, (ui.width or 384) - 2)
+    local usable_h = math.max(44, (ui.height or 192) - 36)
+    geometry.w = math.min(math.max(64, tonumber(geometry.w) or 220), usable_w)
+    geometry.h = math.min(math.max(44, tonumber(geometry.h) or 120), usable_h)
+    geometry.x = math.max(1, math.min(tonumber(geometry.x) or 1, (ui.width or 384) - geometry.w + 1))
+    geometry.y = math.max(12, math.min(tonumber(geometry.y) or 12, (ui.height or 192) - geometry.h - 26))
+    geometry.screen_width = ui.width
+    geometry.screen_height = ui.height
+    return geometry
+  end
 
   local function draw_wallpaper(ui)
     local exact_path = paths.join(paths.assets, "wallpaper-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png")
@@ -513,15 +572,16 @@ function M.new(ctx)
     local app_id = active_app_id(ui)
     local menu = ctx.menu_service.menuFor(app_id).data or {}
     table.insert(menu, 1, { id = "system", label = "About" })
+    local clock = ctx.time_service and ctx.time_service.clockText() or ""
+    local menu_limit = math.max(40, ui.width - (#clock * CELL_W) - 18)
     for _, item in ipairs(menu) do
       local label = item.label
       local width = (#label * 6) + 8
+      if x + width > menu_limit then break end
       draw_text(ui.gpu, x, 3, label, item.enabled == false and COLORS.gray or COLORS.white, -1)
       add_hit(ui, "top_menu", x - 3, 1, width, 12, { app_id = app_id, action = item.id })
       x = x + width + 2
-      if x > ui.width - 72 then break end
     end
-    local clock = ctx.time_service and ctx.time_service.clockText() or ""
     draw_text(ui.gpu, ui.width - (#clock * 6) - 5, 3, clock, COLORS.white, -1)
   end
 
@@ -540,6 +600,7 @@ function M.new(ctx)
     elseif app_id == "dock.studio" then
       geometry = { x = 22, y = 18, w = math.min(340, ui.width - 36), h = math.min(142, ui.height - 56) }
     end
+    geometry = fit_geometry(ui, geometry)
     local app = ctx.app_service.getApp(app_id)
     if app.ok and app.data.manifest.type ~= "system" and ctx.app_runtime_service and ctx.app_runtime_service.stateForApp then
       local runtime = ctx.app_runtime_service.stateForApp(app_id).data
@@ -696,15 +757,20 @@ function M.new(ctx)
     local y = dock_y + 4
     local pinned, opened = dock_apps(ui)
     local active = active_app_id(ui) or (pinned[1] and pinned[1].manifest.id)
+    local icon_limit = math.max(dock_x + 32, ui.width - 96)
     for _, app in ipairs(pinned) do
+      if x + 18 > icon_limit then break end
       draw_icon_square(ui, x, y, app, active == app.manifest.id)
       x = x + 20
     end
     ui.dock_metrics = { x = dock_x, y = dock_y, w = dock_w, h = dock_h, divider_x = x + 1 }
-    rect(ui.gpu, x + 1, dock_y + 5, 1, dock_h - 10, COLORS.white)
-    add_hit(ui, "dock_divider", x - 4, dock_y, 9, dock_h)
-    x = x + 11
+    if x + 11 < icon_limit then
+      rect(ui.gpu, x + 1, dock_y + 5, 1, dock_h - 10, COLORS.white)
+      add_hit(ui, "dock_divider", x - 4, dock_y, 9, dock_h)
+      x = x + 11
+    end
     for _, app in ipairs(opened) do
+      if x + 18 > icon_limit then break end
       draw_icon_square(ui, x, y, app, active == app.manifest.id)
       x = x + 20
     end
@@ -987,7 +1053,10 @@ function M.new(ctx)
 
   local function draw_settings_button(ui, id, x, y, width, height, label, payload, color, text_color)
     small_round(ui.gpu, x, y, width, height, color or rgb(226, 231, 238))
-    draw_text(ui.gpu, x + 8, y + math.max(3, math.floor((height - 8) / 2)), ellipsize(label, math.floor((width - 16) / 6)), text_color or COLORS.black, -1)
+    local chars = math.max(1, math.floor((width - 8) / CELL_W))
+    local text = ellipsize(label, chars)
+    local text_x = x + math.max(4, math.floor((width - (#text * CELL_W)) / 2))
+    draw_text(ui.gpu, text_x, y + math.max(3, math.floor((height - 8) / 2)), text, text_color or COLORS.black, -1)
     add_hit(ui, id, x, y, width, height, payload)
   end
 
@@ -1172,15 +1241,20 @@ function M.new(ctx)
     rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(246, 247, 250))
     draw_text(ui.gpu, content_x + 8, content_y + 8, ellipsize(view.name or window.app.manifest.name, math.floor((content_w - 16) / 6)), COLORS.black, -1)
     local offset_y = content_y + 24
+    local clip_x, clip_y = content_x + 2, offset_y
+    local clip_w, clip_h = math.max(1, content_w - 4), math.max(1, content_h - 26)
     for index, component in ipairs(view.components or {}) do
       local cx = content_x + math.max(1, component.x or 1)
       local cy = offset_y + math.max(1, component.y or 1)
-      local cw = math.max(16, math.min(content_w - (cx - content_x) - 3, component.w or 60))
-      local ch = math.max(10, math.min(content_h - (cy - content_y) - 3, component.h or 16))
-      if cy + ch >= content_y and cy <= content_y + content_h then
-        draw_studio_component(ui, component, cx, cy, cw, ch, false, false)
+      local cw = math.max(16, component.w or 60)
+      local ch = math.max(10, component.h or 16)
+      local x1, y1 = math.max(clip_x, cx), math.max(clip_y, cy)
+      local x2, y2 = math.min(clip_x + clip_w - 1, cx + cw - 1), math.min(clip_y + clip_h - 1, cy + ch - 1)
+      if x2 >= x1 and y2 >= y1 then
+        local draw_w, draw_h = x2 - x1 + 1, y2 - y1 + 1
+        draw_studio_component(ui, component, x1, y1, draw_w, draw_h, false, false)
         if component.kind == "button" then
-          add_hit(ui, "app_component_button", cx, cy, cw, ch, { app_id = window.app_id, id = component.id, index = index, kind = "button", action = component.action, message = component.message })
+          add_hit(ui, "app_component_button", x1, y1, draw_w, draw_h, { app_id = window.app_id, id = component.id, index = index, kind = "button", action = component.action, message = component.message })
         end
       end
     end
@@ -1206,15 +1280,7 @@ function M.new(ctx)
       { id = "studio_mode", label = "Script", payload = "script" },
       { id = "studio_mode", label = "Design", payload = "design" },
       { id = "studio_mode", label = "Preview", payload = "preview" },
-      { id = "studio_example", label = "Notify", payload = "notify" },
-      { id = "studio_example", label = "Counter", payload = "counter" },
-      { id = "studio_example", label = "Duo", payload = "duo" },
       { id = "studio_icon", label = "Icon" },
-      { id = "studio_insert", label = "Text", payload = "text" },
-      { id = "studio_insert", label = "Button", payload = "button" },
-      { id = "studio_insert", label = "Input", payload = "input" },
-      { id = "studio_insert", label = "Shape", payload = "shape" },
-      { id = "studio_insert", label = "Image", payload = "image" },
     }
     for _, button in ipairs(buttons) do
       local bw = math.max(24, #button.label * 6 + 10)
@@ -1231,8 +1297,10 @@ function M.new(ctx)
         bx = bx + bw + 4
       end
     end
-    local status = project.dirty and "Unsaved" or "Saved"
-    draw_text(ui.gpu, content_x + content_w - (#status * 6) - 8, content_y + 6, status, COLORS.white, -1)
+    local diagnostics = ctx.studio_service.diagnostics and ctx.studio_service.diagnostics().data or { count = 0 }
+    local status = diagnostics.count and diagnostics.count > 0 and (tostring(diagnostics.count) .. " issue") or (project.dirty and "Unsaved" or "Saved")
+    local status_x = content_x + content_w - (#status * 6) - 8
+    if status_x > content_x + 8 then draw_text(ui.gpu, status_x, content_y + 6, status, COLORS.white, -1) end
 
     local body_y = content_y + toolbar_h + 4
     local body_h = content_h - toolbar_h - 8
@@ -1329,6 +1397,32 @@ function M.new(ctx)
             draw_text(ui.gpu, sx + 3, sy + 2, control.label, COLORS.white, -1)
             add_hit(ui, "studio_resize", sx, sy, 18, 11, { index = project.selected, dw = control.dw, dh = control.dh })
             sx = sx + 21
+          end
+          local example_y = sy + 15
+          if example_y + 24 <= body_y + body_h then
+            draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
+            local ex_x = content_x + 6
+            local examples = {
+              { label = "Notify", payload = "notify" },
+              { label = "Counter", payload = "counter" },
+              { label = "Duo", payload = "duo" },
+            }
+            for _, example in ipairs(examples) do
+              local bw = math.max(24, #example.label * 6 + 8)
+              if ex_x + bw > content_x + side_w - 4 then break end
+              small_round(ui.gpu, ex_x, example_y + 12, bw, 11, rgb(49, 55, 66))
+              draw_text(ui.gpu, ex_x + 4, example_y + 14, example.label, COLORS.white, -1)
+              add_hit(ui, "studio_example", ex_x, example_y + 12, bw, 12, example.payload)
+              ex_x = ex_x + bw + 4
+            end
+          end
+        else
+          local example_y = kind_y + 18
+          if example_y + 24 <= body_y + body_h then
+            draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
+            small_round(ui.gpu, content_x + 6, example_y + 12, 44, 11, rgb(49, 55, 66))
+            draw_text(ui.gpu, content_x + 10, example_y + 14, "Notify", COLORS.white, -1)
+            add_hit(ui, "studio_example", content_x + 6, example_y + 12, 44, 12, "notify")
           end
         end
       end

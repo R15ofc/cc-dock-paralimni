@@ -135,8 +135,9 @@ return {
     local studio_delete_line = ctx.studio_service.deleteScriptLine(2)
     local studio_icon = ctx.studio_service.setIcon("placeholder")
     local studio_example = ctx.studio_service.loadExample("duo")
+    local studio_diagnostics = ctx.studio_service.diagnostics()
     local studio_export = ctx.studio_service.exportApp()
-    check("studio service", studio_new.ok and studio_mode.ok and studio_tool.ok and studio_add.ok and studio_add.data.components[studio_add.data.selected].x == 44 and studio_move.ok and studio_resize.ok and studio_source.ok and studio_line.ok and studio_insert_line.ok and studio_delete_line.ok and studio_icon.ok and studio_example.ok and studio_export.ok and fs.exists(studio_export.data.manifest) and fs.exists(studio_export.data.ui) and studio_export.data.path:match("%.app$") ~= nil)
+    check("studio service", studio_new.ok and studio_mode.ok and studio_tool.ok and studio_add.ok and studio_add.data.components[studio_add.data.selected].x == 44 and studio_move.ok and studio_resize.ok and studio_source.ok and studio_line.ok and studio_insert_line.ok and studio_delete_line.ok and studio_icon.ok and studio_example.ok and studio_diagnostics.ok and studio_diagnostics.data.count == 0 and studio_export.ok and fs.exists(studio_export.data.manifest) and fs.exists(studio_export.data.ui) and studio_export.data.path:match("%.app$") ~= nil)
     ctx.app_service.scanApps()
     local studio_app_id = ctx.studio_service.current().data.id
     check("app bundle registry", ctx.app_service.getApp(studio_app_id).ok)

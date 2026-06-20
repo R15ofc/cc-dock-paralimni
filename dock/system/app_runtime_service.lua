@@ -187,6 +187,7 @@ function M.new(ctx)
         setScriptLine = function(line, value) return ctx.studio_service.setScriptLine(line, value) end,
         insertScriptLine = function(line, value) return ctx.studio_service.insertScriptLine(line, value) end,
         deleteScriptLine = function(line) return ctx.studio_service.deleteScriptLine(line) end,
+        diagnostics = function() return ctx.studio_service.diagnostics() end,
         setMode = function(mode) return ctx.studio_service.setMode(mode) end,
         setTool = function(tool, insert_kind) return ctx.studio_service.setTool(tool, insert_kind) end,
         setIcon = function(icon) return ctx.studio_service.setIcon(icon) end,

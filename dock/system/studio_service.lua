@@ -71,6 +71,29 @@ local function number_pair(value, default_w, default_h)
   return tonumber(w) or default_w, tonumber(h) or default_h
 end
 
+local function clamp_component(project, component)
+  local window = project.window or { w = 220, h = 120 }
+  local window_w = math.max(80, tonumber(window.w) or 220)
+  local window_h = math.max(60, tonumber(window.h) or 120)
+  local max_w = math.max(12, window_w - 2)
+  local max_h = math.max(8, window_h - 24)
+  component.w = math.max(12, math.min(max_w, math.floor(tonumber(component.w) or 60)))
+  component.h = math.max(8, math.min(max_h, math.floor(tonumber(component.h) or 16)))
+  component.x = math.max(1, math.min(math.max(1, window_w - component.w - 1), math.floor(tonumber(component.x) or 1)))
+  component.y = math.max(1, math.min(math.max(1, window_h - 22 - component.h), math.floor(tonumber(component.y) or 1)))
+  return component
+end
+
+local function normalize_layout(project)
+  local window = project.window or { w = 220, h = 120, titlebar = true }
+  window.w = math.max(80, math.min(640, math.floor(tonumber(window.w) or 220)))
+  window.h = math.max(60, math.min(360, math.floor(tonumber(window.h) or 120)))
+  project.window = window
+  for _, component in ipairs(project.components or {}) do clamp_component(project, component) end
+  project.selected = math.min(math.max(1, tonumber(project.selected) or 1), math.max(1, #(project.components or {})))
+  return project
+end
+
 local function parse_components(script)
   local components = {}
   local seen_ui = false
@@ -157,6 +180,7 @@ local function apply_script(project, script)
     project.components = parsed
     project.selected = math.min(math.max(1, tonumber(project.selected) or 1), math.max(1, #project.components))
   end
+  normalize_layout(project)
   return project
 end
 
@@ -214,6 +238,7 @@ function M.new(ctx)
   end
 
   local function refresh(project)
+    normalize_layout(project)
     project.script = dockscript(project)
     project.code = project.script
     return project
@@ -337,6 +362,7 @@ function M.new(ctx)
     elseif kind == "image" then component.label = "Image"; component.source = "placeholder"; component.w = 54; component.h = 34
     elseif kind == "shape" then component.label = "Shape"; component.color = "blue"; component.w = 72; component.h = 38
     else component.label = "Button"; component.action = "notify"; component.message = "Button pressed"; component.kind = "button" end
+    clamp_component(project, component)
     table.insert(project.components, component)
     project.selected = #project.components
     project.dirty = true
@@ -356,9 +382,9 @@ function M.new(ctx)
     index = tonumber(index)
     local component = index and project.components[index]
     if not component then return err("component not found", "NOT_FOUND") end
-    local window = project.window or { w = 220, h = 120 }
-    component.x = math.max(1, math.min((window.w or 220) - math.max(12, component.w or 40), math.floor(tonumber(x) or component.x or 1)))
-    component.y = math.max(1, math.min((window.h or 120) - 22 - math.max(8, component.h or 12), math.floor(tonumber(y) or component.y or 1)))
+    component.x = math.floor(tonumber(x) or component.x or 1)
+    component.y = math.floor(tonumber(y) or component.y or 1)
+    clamp_component(project, component)
     project.selected = index
     project.dirty = true
     return ok(sync_component_line(project, index))
@@ -370,6 +396,7 @@ function M.new(ctx)
     if not component then return err("component not found", "NOT_FOUND") end
     component.w = math.max(12, (component.w or 40) + (tonumber(dw) or 0))
     component.h = math.max(8, (component.h or 12) + (tonumber(dh) or 0))
+    clamp_component(project, component)
     project.dirty = true
     return ok(sync_component_line(project, tonumber(index) or -1))
   end
@@ -381,6 +408,7 @@ function M.new(ctx)
     field = tostring(field or "label")
     if field == "x" or field == "y" or field == "w" or field == "h" then value = tonumber(value) or component[field] or 0 end
     component[field] = value
+    clamp_component(project, component)
     project.dirty = true
     return ok(sync_component_line(project, tonumber(project.selected) or -1))
   end
@@ -402,6 +430,26 @@ function M.new(ctx)
     local project = service.current().data
     project.code = project.script or dockscript(project)
     return ok(project.code)
+  end
+
+  function service.diagnostics()
+    local project = service.current().data
+    local issues = {}
+    local seen = {}
+    local window = project.window or { w = 220, h = 120 }
+    for index, component in ipairs(project.components or {}) do
+      local id = tostring(component.id or "")
+      if id == "" then
+        table.insert(issues, { level = "error", message = "Component " .. tostring(index) .. " has no id" })
+      elseif seen[id] then
+        table.insert(issues, { level = "error", message = "Duplicate component id: " .. id })
+      end
+      seen[id] = true
+      if (component.x or 1) < 1 or (component.y or 1) < 1 or ((component.x or 1) + (component.w or 0)) > (window.w or 220) or ((component.y or 1) + (component.h or 0)) > ((window.h or 120) - 20) then
+        table.insert(issues, { level = "warning", message = "Component outside window: " .. (id ~= "" and id or tostring(index)) })
+      end
+    end
+    return ok({ count = #issues, issues = issues })
   end
 
   function service.setScript(script)

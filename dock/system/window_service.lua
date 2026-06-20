@@ -6,6 +6,18 @@ local M = {}
 local function ok(data) return { ok = true, data = data } end
 local function err(message, code) return { ok = false, error = tostring(message), code = code or "WINDOW_ERROR" } end
 
+local function clamp_window(window, screen_width, screen_height)
+  local sw = math.max(80, tonumber(screen_width) or 384)
+  local sh = math.max(72, tonumber(screen_height) or 192)
+  local max_w = math.max(64, sw - 2)
+  local max_h = math.max(44, sh - 36)
+  window.w = math.min(math.max(64, tonumber(window.w) or 220), max_w)
+  window.h = math.min(math.max(44, tonumber(window.h) or 120), max_h)
+  window.x = math.max(1, math.min(tonumber(window.x) or 1, sw - window.w + 1))
+  window.y = math.max(12, math.min(tonumber(window.y) or 12, sh - window.h - 26))
+  return window
+end
+
 function M.new(ctx)
   local service = {
     ctx = ctx,
@@ -62,10 +74,7 @@ function M.new(ctx)
     for _, item in ipairs((read.data and read.data.windows) or {}) do
       local window = decorate(item)
       if window then
-        window.w = math.max(80, math.min(window.w, (screen_width or 384) - 2))
-        window.h = math.max(48, math.min(window.h, (screen_height or 192) - 32))
-        window.x = math.max(1, math.min(window.x, (screen_width or 384) - window.w + 1))
-        window.y = math.max(8, math.min(window.y, (screen_height or 192) - window.h - 26))
+        clamp_window(window, screen_width, screen_height)
         table.insert(service.windows, window)
       end
     end
@@ -129,6 +138,7 @@ function M.new(ctx)
       fullscreen = false,
       z = service.next_z,
     }
+    clamp_window(window, geometry and geometry.screen_width, geometry and geometry.screen_height)
     table.insert(service.windows, window)
     service.active = id
     service.save()
@@ -172,8 +182,9 @@ function M.new(ctx)
     local window = service.get(id)
     if not window.ok then return window end
     if window.data.fullscreen then return ok(window.data) end
-    window.data.x = math.max(1, math.min(screen_width - window.data.w + 1, math.floor(x)))
-    window.data.y = math.max(8, math.min(screen_height - window.data.h - 26, math.floor(y)))
+    window.data.x = math.floor(tonumber(x) or window.data.x)
+    window.data.y = math.floor(tonumber(y) or window.data.y)
+    clamp_window(window.data, screen_width, screen_height)
     service.save()
     return ok(window.data)
   end
