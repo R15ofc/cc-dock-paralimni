@@ -119,7 +119,17 @@ local function parse_components(script)
     if trimmed:match("^ui%.") then seen_ui = true end
     local id, x, y, text = trimmed:match('^ui%.text%(%s*"([^"]+)"%s*,%s*(-?%d+)%s*,%s*(-?%d+)%s*,%s*"([^"]*)"')
     if id then
-      table.insert(components, { id = id, kind = "text", text = text, x = tonumber(x), y = tonumber(y), w = math.max(42, #text * 6), h = 14 })
+      table.insert(components, {
+        id = id,
+        kind = "text",
+        text = text,
+        binding = trimmed:match('bind%s*=%s*"([^"]+)"'),
+        prefix = trimmed:match('prefix%s*=%s*"([^"]+)"'),
+        x = tonumber(x),
+        y = tonumber(y),
+        w = math.max(42, #text * 6),
+        h = 14,
+      })
     else
       local label
       id, x, y, w, h, label = trimmed:match('^ui%.button%(%s*"([^"]+)"%s*,%s*(-?%d+)%s*,%s*(-?%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*,%s*"([^"]*)"')
@@ -152,7 +162,10 @@ end
 local function component_script_line(component, index)
   local id = component.id or (component.kind or "node") .. tostring(index)
   if component.kind == "text" then
-    return "ui.text(" .. escape_lua(id) .. ", " .. tostring(component.x or 1) .. ", " .. tostring(component.y or 1) .. ", " .. escape_lua(component.text or "Text") .. ")"
+    local extras = ""
+    if component.binding then extras = extras .. ", bind=" .. escape_lua(component.binding) end
+    if component.prefix then extras = extras .. ", prefix=" .. escape_lua(component.prefix) end
+    return "ui.text(" .. escape_lua(id) .. ", " .. tostring(component.x or 1) .. ", " .. tostring(component.y or 1) .. ", " .. escape_lua(component.text or "Text") .. extras .. ")"
   elseif component.kind == "button" then
     return "ui.button(" .. escape_lua(id) .. ", " .. tostring(component.x or 1) .. ", " .. tostring(component.y or 1) .. ", " .. tostring(component.w or 64) .. ", " .. tostring(component.h or 16) .. ", " .. escape_lua(component.label or "Button") .. ", on_click=" .. escape_lua(component.action or "notify") .. ")"
   elseif component.kind == "input" then
@@ -231,9 +244,15 @@ local function render_main(project)
     "      local event, payload = coroutine.yield(\"*\")",
     "      if event == \"dock_app_event\" and type(payload) == \"table\" and payload.app_id == ctx.app.id then",
     "        if payload.kind == \"button\" then",
-    "          local message = payload.message or \"Button pressed\"",
-    "          ctx.storage.set(\"last_button\", payload.id or payload.index or \"button\")",
-    "          ctx.notification.send(app_name, message)",
+    "          if payload.action == \"increment\" then",
+    "            local current = ctx.storage.get(\"clicks\", 0)",
+    "            local count = tonumber(current and current.data) or 0",
+    "            ctx.storage.set(\"clicks\", count + 1)",
+    "          else",
+    "            local message = payload.message or \"Button pressed\"",
+    "            ctx.storage.set(\"last_button\", payload.id or payload.index or \"button\")",
+    "            ctx.notification.send(app_name, message)",
+    "          end",
     "        end",
     "      elseif event == \"terminate\" then",
     "        break",
@@ -350,9 +369,48 @@ function M.new(ctx)
   function service.setMode(mode)
     local project = service.current().data
     mode = tostring(mode or "design")
-    if mode ~= "script" and mode ~= "design" and mode ~= "preview" then mode = "design" end
+    if mode ~= "script" and mode ~= "design" and mode ~= "preview" and mode ~= "open" then mode = "design" end
     project.mode = mode
     return ok(project)
+  end
+
+  function service.listProjects()
+    ensure()
+    local projects = {}
+    for _, name in ipairs(fs.list(projects_dir)) do
+      if name:match("%.json$") then
+        local path = paths.join(projects_dir, name)
+        local read = ctx.safe_io.readJson(path, nil)
+        if read.ok and type(read.data) == "table" then
+          table.insert(projects, {
+            id = read.data.id or name:gsub("%.json$", ""),
+            name = read.data.name or read.data.id or name,
+            version = read.data.version or "0.0.1",
+            path = path,
+          })
+        end
+      end
+    end
+    table.sort(projects, function(a, b) return tostring(a.name) < tostring(b.name) end)
+    return ok(projects)
+  end
+
+  function service.openProject(id)
+    ensure()
+    id = tostring(id or "")
+    if id == "" then return err("project id required", "INVALID_PROJECT") end
+    local path = paths.join(projects_dir, id .. ".json")
+    if not fs.exists(path) then return err("project not found: " .. id, "NOT_FOUND") end
+    local read = ctx.safe_io.readJson(path, nil)
+    if not read.ok then return read end
+    service.project = read.data
+    normalize_layout(service.project)
+    service.project.mode = "design"
+    service.project.tool = service.project.tool or "move"
+    service.project.insert_kind = service.project.insert_kind or "button"
+    service.project.panel_scroll = 0
+    service.project.dirty = false
+    return ok(service.project)
   end
 
   function service.setTool(tool, insert_kind)
@@ -568,6 +626,15 @@ function M.new(ctx)
         { id = "increment", kind = "button", label = "Increment", action = "notify", message = "Counter clicked", x = 14, y = 34, w = 78, h = 16 },
         { id = "panel", kind = "shape", label = "Panel", color = "blue", x = 108, y = 16, w = 70, h = 54 },
       }
+    elseif name == "clicker" then
+      project.name = "Clicker App"
+      project.id = safe_id(project.name)
+      project.window = { w = 220, h = 120, titlebar = true }
+      project.components = {
+        { id = "title", kind = "text", text = "Click counter", x = 16, y = 14, w = 100, h = 12 },
+        { id = "count", kind = "text", text = "Clicks: 0", binding = "storage.clicks", prefix = "Clicks: ", x = 16, y = 34, w = 90, h = 12 },
+        { id = "click", kind = "button", label = "Click", action = "increment", message = "Clicked", x = 16, y = 56, w = 64, h = 18 },
+      }
     else
       project.name = "Notification App"
       project.id = safe_id(project.name)
@@ -628,10 +695,24 @@ function M.new(ctx)
     return ctx.safe_io.writeJson(path, project)
   end
 
+  local function remove_old_exports(project, target)
+    local apps_dir = paths.userFolder("default", "Apps")
+    if not fs.exists(apps_dir) or not fs.isDir(apps_dir) then return end
+    for _, name in ipairs(fs.list(apps_dir)) do
+      local dir = paths.join(apps_dir, name)
+      local manifest_path = paths.join(dir, "app.json")
+      if dir ~= target and fs.isDir(dir) and fs.exists(manifest_path) then
+        local manifest = ctx.safe_io.readJson(manifest_path, nil)
+        if manifest.ok and manifest.data and manifest.data.id == project.id then fs.delete(dir) end
+      end
+    end
+  end
+
   function service.exportApp()
     local project = service.current().data
     apply_script(project, project.script)
     local target = paths.join(paths.userFolder("default", "Apps"), safe_file_name(project.name) .. ".app")
+    remove_old_exports(project, target)
     if fs.exists(target) then fs.delete(target) end
     fs.makeDir(target)
     local manifest = ctx.safe_io.writeFile(paths.join(target, "app.json"), encode_manifest(project))
@@ -653,7 +734,8 @@ function M.new(ctx)
       for _, permission in ipairs(project.permissions or {}) do ctx.permission_service.grant(project.id, permission) end
     end
     project.dirty = false
-    return ok({ path = target, manifest = paths.join(target, "app.json"), ui = paths.join(target, "ui.json") })
+    service.save()
+    return ok({ path = target, manifest = paths.join(target, "app.json"), ui = paths.join(target, "ui.json"), app_id = project.id })
   end
 
   function service.preview()

@@ -178,6 +178,8 @@ function M.new(ctx)
       studio_service = {
         current = function() return ctx.studio_service.current() end,
         newProject = function(name) return ctx.studio_service.newProject(name) end,
+        listProjects = function() return ctx.studio_service.listProjects() end,
+        openProject = function(id) return ctx.studio_service.openProject(id) end,
         addComponent = function(kind, x, y) return ctx.studio_service.addComponent(kind, x, y) end,
         selectComponent = function(index) return ctx.studio_service.selectComponent(index) end,
         moveComponent = function(index, x, y) return ctx.studio_service.moveComponent(index, x, y) end,

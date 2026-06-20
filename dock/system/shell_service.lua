@@ -437,6 +437,12 @@ function M.new(ctx)
       local result
       if action == "new" then result = ctx.studio_service.newProject(join_words(args, 3))
       elseif action == "save" then result = ctx.studio_service.save()
+      elseif action == "list" then
+        result = ctx.studio_service.listProjects()
+        if result.ok then
+          for _, project_item in ipairs(result.data or {}) do safe_print(project_item.id .. "  " .. project_item.name) end
+        end
+      elseif action == "open" then result = ctx.studio_service.openProject(args[3])
       elseif action == "export" then result = ctx.studio_service.exportApp()
       elseif action == "icon" then result = ctx.studio_service.setIcon(args[3] or "placeholder")
       elseif action == "example" then result = ctx.studio_service.loadExample(args[3] or "notify")
@@ -954,14 +960,12 @@ function M.new(ctx)
     end
     draw_text(ui.gpu, x, y, shown, text_color or COLORS.white, bg_color or -1)
     if active then
-      local cursor_x = x + math.min(view.cursor or 0, chars) * 6
+      local cursor_x = x + math.min(view.cursor or 0, chars) * CELL_W
       rect(ui.gpu, cursor_x, y - 2, 1, 12, text_color or COLORS.white)
-      rect(ui.gpu, cursor_x - 2, y - 3, 5, 1, text_color or COLORS.white)
-      rect(ui.gpu, cursor_x - 2, y + 10, 5, 1, text_color or COLORS.white)
     end
   end
 
-  local CODE_CELL_W = 8
+  local CODE_CELL_W = CELL_W
 
   local function draw_code_line_editor(ui, x, y, width, value, active, input_id_value, scroll_x)
     value = tostring(value or "")
@@ -980,13 +984,11 @@ function M.new(ctx)
       local right = math.min(scroll_x + chars, math.max(view.selection_start, view.selection_end))
       if right > left then rect(ui.gpu, x + ((left - scroll_x) * CODE_CELL_W), y - 2, (right - left) * CODE_CELL_W, 11, rgb(40, 95, 170)) end
     end
-    draw_text(ui.gpu, x, y, shown, active and COLORS.black or rgb(186, 218, 255), -1)
+    draw_text(ui.gpu, x, y, shown, active and COLORS.white or rgb(186, 218, 255), -1)
     if active then
       local cursor_x = x + (((view.cursor or 0) - scroll_x) * CODE_CELL_W)
       if cursor_x >= x and cursor_x <= x + width then
-        rect(ui.gpu, cursor_x, y - 2, 1, 12, COLORS.red)
-        rect(ui.gpu, cursor_x - 2, y - 3, 5, 1, COLORS.red)
-        rect(ui.gpu, cursor_x - 2, y + 10, 5, 1, COLORS.red)
+        rect(ui.gpu, cursor_x, y - 2, 1, 12, COLORS.white)
       end
     end
     return scroll_x
@@ -1311,6 +1313,31 @@ function M.new(ctx)
     return nil
   end
 
+  local function app_storage_value(app_id, key, default)
+    if not app_id or not key or not ctx.safe_io then return default end
+    local path = paths.join(paths.appData("default", app_id), "storage.json")
+    local read = ctx.safe_io.readJson(path, {})
+    if not read.ok or type(read.data) ~= "table" then return default end
+    local value = read.data[tostring(key)]
+    if value == nil then return default end
+    return value
+  end
+
+  local function display_component(app_id, component)
+    if component.kind == "text" and component.binding == "storage.clicks" then
+      return {
+        id = component.id,
+        kind = "text",
+        text = tostring(component.prefix or "") .. tostring(app_storage_value(app_id, "clicks", 0)),
+        x = component.x,
+        y = component.y,
+        w = component.w,
+        h = component.h,
+      }
+    end
+    return component
+  end
+
   local function draw_generated_app(ui, window, x, y, w, h)
     local view = read_app_ui(window.app)
     if not view then return false end
@@ -1322,6 +1349,7 @@ function M.new(ctx)
     local clip_x, clip_y = content_x + 2, offset_y
     local clip_w, clip_h = math.max(1, content_w - 4), math.max(1, content_h - 26)
     for index, component in ipairs(view.components or {}) do
+      component = display_component(window.app_id, component)
       local cx = content_x + math.max(1, component.x or 1)
       local cy = offset_y + math.max(1, component.y or 1)
       local cw = math.max(16, component.w or 60)
@@ -1352,6 +1380,7 @@ function M.new(ctx)
     local by = content_y + 4
     local buttons = {
       { id = "studio_new", label = "New" },
+      { id = "studio_mode", label = "Open", payload = "open" },
       { id = "studio_save", label = "Save" },
       { id = "studio_run", label = "Run" },
       { id = "studio_export", label = "Export" },
@@ -1382,9 +1411,28 @@ function M.new(ctx)
 
     local body_y = content_y + toolbar_h + 4
     local body_h = content_h - toolbar_h - 8
+    local open_mode = mode == "open"
     local script_mode = mode == "script"
     local preview_mode = mode == "preview"
     local design_mode = not script_mode and not preview_mode
+    if open_mode then
+      local projects = ctx.studio_service.listProjects().data or {}
+      rect(ui.gpu, content_x, body_y, content_w, body_h, rgb(8, 10, 14))
+      draw_text(ui.gpu, content_x + 8, body_y + 6, "Open Project", rgb(205, 226, 255), -1)
+      local row_y = body_y + 22
+      local visible = math.max(1, math.floor((body_h - 26) / 17))
+      for index = 1, math.min(visible, #projects) do
+        local project_item = projects[index]
+        local selected_project = project_item.id == project.id
+        small_round(ui.gpu, content_x + 8, row_y, content_w - 16, 14, selected_project and COLORS.blue or rgb(35, 40, 50))
+        draw_text(ui.gpu, content_x + 16, row_y + 4, ellipsize(project_item.name, math.floor((content_w - 96) / CELL_W)), COLORS.white, -1)
+        draw_text(ui.gpu, content_x + content_w - 70, row_y + 4, ellipsize(project_item.id, 10), rgb(205, 226, 255), -1)
+        add_hit(ui, "studio_open_project", content_x + 8, row_y, content_w - 16, 15, project_item.id)
+        row_y = row_y + 17
+      end
+      if #projects == 0 then draw_text(ui.gpu, content_x + 8, body_y + 26, "No saved projects", COLORS.white, -1) end
+      return
+    end
     local side_w = script_mode and content_w or (preview_mode and 0 or math.max(92, math.min(118, math.floor(content_w * 0.34))))
     local preview_x = script_mode and (content_x + content_w + 1) or (content_x + side_w + (side_w > 0 and 5 or 0))
     local preview_w = script_mode and 0 or (content_w - side_w - (side_w > 0 and 5 or 0))
@@ -1415,7 +1463,7 @@ function M.new(ctx)
           local active = focused_input(ui, "studio_code", window.id) and ui.text_input and ui.text_input.extra and ui.text_input.extra.line == line_index
           local line_key = input_id("studio_code", window.id)
           local scroll_x = active and ui.text_input and ui.text_input.extra and ui.text_input.extra.scroll_x or 0
-          if active then rect(ui.gpu, text_x - 2, line_y - 2, side_w - 27, 11, rgb(238, 242, 248)) end
+          if active then rect(ui.gpu, text_x - 2, line_y - 2, side_w - 27, 11, rgb(20, 26, 36)) end
           scroll_x = draw_code_line_editor(ui, text_x, line_y, side_w - 31, line, active, line_key, scroll_x)
           if active and ui.text_input and ui.text_input.extra then ui.text_input.extra.scroll_x = scroll_x end
           add_hit(ui, "studio_code_line", text_x - 3, line_y - 3, side_w - 20, 13, { window_id = window.id, line = line_index, value = line, text_x = text_x, scroll_x = scroll_x, char_w = CODE_CELL_W })
@@ -1503,6 +1551,7 @@ function M.new(ctx)
           local examples = {
             { label = "Notify", payload = "notify" },
             { label = "Counter", payload = "counter" },
+            { label = "Clicker", payload = "clicker" },
             { label = "Duo", payload = "duo" },
           }
           for _, example in ipairs(examples) do
@@ -1517,9 +1566,19 @@ function M.new(ctx)
         else
           local example_y = kind_y + 18
           draw_text(ui.gpu, content_x + 6, example_y, "Examples", rgb(205, 226, 255), -1)
-          small_round(ui.gpu, content_x + 6, example_y + 12, 44, 11, rgb(49, 55, 66))
-          draw_text(ui.gpu, content_x + 10, example_y + 14, "Notify", COLORS.white, -1)
-          add_hit(ui, "studio_example", content_x + 6, example_y + 12, 44, 12, "notify")
+          local ex_x = content_x + 6
+          local examples = {
+            { label = "Notify", payload = "notify" },
+            { label = "Clicker", payload = "clicker" },
+          }
+          for _, example in ipairs(examples) do
+            local bw = math.max(24, #example.label * 6 + 8)
+            if ex_x + bw > content_x + side_w - 4 then ex_x = content_x + 6; example_y = example_y + 13 end
+            small_round(ui.gpu, ex_x, example_y + 12, bw, 11, rgb(49, 55, 66))
+            draw_text(ui.gpu, ex_x + 4, example_y + 14, example.label, COLORS.white, -1)
+            add_hit(ui, "studio_example", ex_x, example_y + 12, bw, 12, example.payload)
+            ex_x = ex_x + bw + 4
+          end
           panel_end_y = example_y + 25
         end
         pop_ui_clip(ui)
@@ -1785,11 +1844,17 @@ function M.new(ctx)
       local exported = ctx.studio_service.exportApp()
       if exported.ok then
         ctx.app_service.scanApps()
-        local project = ctx.studio_service.current().data
-        open_window(ui, project.id)
+        local app_id = exported.data and exported.data.app_id or ctx.studio_service.current().data.id
+        if ctx.app_runtime_service and ctx.app_runtime_service.stopApp then ctx.app_runtime_service.stopApp(app_id) end
+        for _, running_window in ipairs(ui.windows or {}) do
+          if running_window.app_id == app_id then ctx.window_service.close(running_window.id) end
+        end
+        sync_windows(ui)
+        open_window(ui, app_id)
       end
     elseif hit.id == "studio_example" then ctx.studio_service.loadExample(hit.payload)
     elseif hit.id == "studio_mode" then ctx.studio_service.setMode(hit.payload)
+    elseif hit.id == "studio_open_project" then ctx.studio_service.openProject(hit.payload)
     elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
     elseif hit.id == "studio_insert" then ctx.studio_service.setMode("design"); ctx.studio_service.setTool("add", hit.payload)
     elseif hit.id == "studio_tool" then ctx.studio_service.setTool(hit.payload.tool, hit.payload.kind)
