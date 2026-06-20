@@ -571,6 +571,7 @@ function M.new(ctx)
   local function settings_go(ui, route)
     local settings = current_settings(ui)
     route = tostring(route or "general")
+    if route == "software_update" and ctx.update_service then ctx.update_service.beginCheck() end
     if settings.route == route then return end
     table.insert(settings.history, settings.route)
     settings.route = route
@@ -583,6 +584,7 @@ function M.new(ctx)
     if not previous then return end
     table.insert(settings.future, settings.route)
     settings.route = previous
+    if settings.route == "software_update" and ctx.update_service then ctx.update_service.beginCheck() end
   end
 
   local function settings_forward(ui)
@@ -591,6 +593,7 @@ function M.new(ctx)
     if not next_route then return end
     table.insert(settings.history, settings.route)
     settings.route = next_route
+    if settings.route == "software_update" and ctx.update_service then ctx.update_service.beginCheck() end
   end
 
   local function settings_scroll(ui, delta)
@@ -780,6 +783,8 @@ function M.new(ctx)
       ctx.explorer_service.setRenameText(ui.text_input.window_id, view.value)
     elseif ui.text_input.kind == "studio_code" and ui.text_input.extra and ui.text_input.extra.line then
       ctx.studio_service.setScriptLine(ui.text_input.extra.line, view.value)
+    elseif ui.text_input.kind == "studio_prop" and ui.text_input.extra and ui.text_input.extra.field then
+      ctx.studio_service.updateSelectedField(ui.text_input.extra.field, view.value)
     end
   end
 
@@ -810,6 +815,37 @@ function M.new(ctx)
       rect(ui.gpu, cursor_x - 2, y - 3, 5, 1, text_color or COLORS.white)
       rect(ui.gpu, cursor_x - 2, y + 10, 5, 1, text_color or COLORS.white)
     end
+  end
+
+  local CODE_CELL_W = 8
+
+  local function draw_code_line_editor(ui, x, y, width, value, active, input_id_value, scroll_x)
+    value = tostring(value or "")
+    local view = active and input_view(input_id_value, value) or { value = value, cursor = 0 }
+    local chars = math.max(1, math.floor(width / CODE_CELL_W))
+    scroll_x = math.max(0, math.floor(tonumber(scroll_x) or 0))
+    if active then
+      local cursor = tonumber(view.cursor) or 0
+      if cursor < scroll_x then scroll_x = cursor end
+      if cursor > scroll_x + chars - 1 then scroll_x = math.max(0, cursor - chars + 1) end
+    end
+    local shown_value = tostring(view.value or value)
+    local shown = shown_value:sub(scroll_x + 1, scroll_x + chars)
+    if active and view.selection_start and view.selection_end then
+      local left = math.max(scroll_x, math.min(view.selection_start, view.selection_end))
+      local right = math.min(scroll_x + chars, math.max(view.selection_start, view.selection_end))
+      if right > left then rect(ui.gpu, x + ((left - scroll_x) * CODE_CELL_W), y - 2, (right - left) * CODE_CELL_W, 11, rgb(40, 95, 170)) end
+    end
+    draw_text(ui.gpu, x, y, shown, active and COLORS.black or rgb(186, 218, 255), -1)
+    if active then
+      local cursor_x = x + (((view.cursor or 0) - scroll_x) * CODE_CELL_W)
+      if cursor_x >= x and cursor_x <= x + width then
+        rect(ui.gpu, cursor_x, y - 2, 1, 12, COLORS.red)
+        rect(ui.gpu, cursor_x - 2, y - 3, 5, 1, COLORS.red)
+        rect(ui.gpu, cursor_x - 2, y + 10, 5, 1, COLORS.red)
+      end
+    end
+    return scroll_x
   end
 
   local function draw_explorer(ui, window, x, y, w, h)
@@ -1031,11 +1067,18 @@ function M.new(ctx)
         draw_text(ui.gpu, card_x + 12, card_y + 9, ellipsize(update.available.title, math.floor((card_w - 24) / 6)), COLORS.black, -1)
         draw_text(ui.gpu, card_x + 12, card_y + 23, ellipsize(update.available.changelog, math.floor((card_w - 24) / 6)), rgb(84, 88, 94), -1)
         draw_text(ui.gpu, card_x + 12, card_y + 37, "Install time: " .. update.available.eta, rgb(84, 88, 94), -1)
-        draw_settings_button(ui, "settings_update_install", card_x + card_w - 62, card_y + card_h - 19, 50, 14, "Update", nil, COLORS.blue, COLORS.white)
+        local update_w = math.min(88, math.max(70, card_w - 18))
+        draw_settings_button(ui, "settings_update_install", card_x + card_w - update_w - 12, card_y + card_h - 19, update_w, 14, "Update", nil, COLORS.blue, COLORS.white)
       elseif update.status == "installing" then
-        draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Installing Update", ui.frame), rgb(116, 121, 128), -1)
+        local label = loading.text("Installing Update", ui.frame)
+        draw_text(ui.gpu, card_x + math.max(8, math.floor((card_w - (#label * 6)) / 2)), card_y + 12, label, rgb(116, 121, 128), -1)
+        local bar_w = math.min(card_w - 28, 124)
+        local bar_x = card_x + math.floor((card_w - bar_w) / 2)
+        local percent = tonumber(update.progress) or 0
+        rect(ui.gpu, bar_x, card_y + 31, bar_w, 4, rgb(212, 217, 224))
+        rect(ui.gpu, bar_x, card_y + 31, math.max(2, math.floor(bar_w * math.max(0, math.min(100, percent)) / 100)), 4, COLORS.blue)
       elseif update.status == "installed" then
-        draw_text(ui.gpu, card_x + 12, card_y + 14, "Update installed. Reboot required.", rgb(60, 64, 70), -1)
+        draw_text(ui.gpu, card_x + 12, card_y + 14, "Restarting...", rgb(60, 64, 70), -1)
       elseif update.status == "error" then
         draw_text(ui.gpu, card_x + 12, card_y + 14, "Update check failed", COLORS.red, -1)
         draw_text(ui.gpu, card_x + 12, card_y + 28, ellipsize(update.error or "Network error", math.floor((card_w - 24) / 6)), rgb(84, 88, 94), -1)
@@ -1146,6 +1189,7 @@ function M.new(ctx)
 
   local function draw_studio(ui, window, x, y, w, h)
     local project = ctx.studio_service.current().data
+    local mode = project.mode or "design"
     local content_x, content_y = x + 6, y + 21
     local content_w, content_h = w - 12, h - 28
     rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(13, 15, 20))
@@ -1159,6 +1203,9 @@ function M.new(ctx)
       { id = "studio_save", label = "Save" },
       { id = "studio_run", label = "Run" },
       { id = "studio_export", label = "Export" },
+      { id = "studio_mode", label = "Script", payload = "script" },
+      { id = "studio_mode", label = "Design", payload = "design" },
+      { id = "studio_mode", label = "Preview", payload = "preview" },
       { id = "studio_example", label = "Notify", payload = "notify" },
       { id = "studio_example", label = "Counter", payload = "counter" },
       { id = "studio_example", label = "Duo", payload = "duo" },
@@ -1176,7 +1223,8 @@ function M.new(ctx)
         by = by + 13
       end
       if by + 11 <= content_y + toolbar_h - 2 then
-        local color = button.id == "studio_run" and COLORS.green or (button.id == "studio_export" and COLORS.blue or rgb(58, 65, 78))
+        local active_mode = button.id == "studio_mode" and button.payload == mode
+        local color = active_mode and COLORS.red or (button.id == "studio_run" and COLORS.green or (button.id == "studio_export" and COLORS.blue or rgb(58, 65, 78)))
         small_round(ui.gpu, bx, by, bw, 11, color)
         draw_text(ui.gpu, bx + 5, by + 2, button.label, COLORS.white, -1)
         add_hit(ui, button.id, bx, by - 1, bw, 13, button.payload)
@@ -1188,67 +1236,105 @@ function M.new(ctx)
 
     local body_y = content_y + toolbar_h + 4
     local body_h = content_h - toolbar_h - 8
-    local code_w = math.max(72, math.min(math.floor(content_w * 0.44), math.max(72, content_w - 90)))
-    local preview_x = content_x + code_w + 5
-    local preview_w = content_w - code_w - 5
-    local prop_h = project.components and project.components[project.selected or 0] and 28 or 0
-    local code_h = math.max(28, body_h - prop_h - (prop_h > 0 and 4 or 0))
-    rect(ui.gpu, content_x, body_y, code_w, body_h, rgb(8, 10, 14))
-    rect(ui.gpu, content_x, body_y, code_w, 14, rgb(15, 18, 24))
-    draw_text(ui.gpu, content_x + 8, body_y + 4, "DockScript", rgb(205, 226, 255), -1)
-
-    local code = ctx.studio_service.sourceCode().data or project.code or ""
-    local lines = {}
-    for line in (tostring(code) .. "\n"):gmatch("(.-)\n") do table.insert(lines, line) end
-    local line_h = 10
-    local code_body_y = body_y + 16
-    local code_body_h = code_h - 18
-    local visible_lines = math.max(1, math.floor(code_body_h / line_h))
-    local max_code_scroll = math.max(0, #lines - visible_lines)
-    project.code_scroll = math.min(max_code_scroll, tonumber(project.code_scroll) or 0)
-    add_hit(ui, "studio_code_panel", content_x, code_body_y, code_w, code_body_h, { window_id = window.id })
-    for row = 1, visible_lines do
-      local line_index = row + (project.code_scroll or 0)
-      local line = lines[line_index]
-      if not line then break end
-      local line_y = code_body_y + (row - 1) * line_h
-      local text_x = content_x + 23
-      draw_text(ui.gpu, content_x + 5, line_y, tostring(line_index), rgb(84, 91, 104), -1)
-      local active = focused_input(ui, "studio_code", window.id) and ui.text_input and ui.text_input.extra and ui.text_input.extra.line == line_index
-      local line_key = input_id("studio_code", window.id)
-      if active then
-        rect(ui.gpu, text_x - 2, line_y - 2, code_w - 25, 11, rgb(238, 242, 248))
-        draw_text_editor(ui, text_x, line_y, code_w - 29, line, true, line_key, COLORS.black, -1)
-      else
-        draw_text(ui.gpu, text_x, line_y, ellipsize(line, math.floor((code_w - 29) / 6)), rgb(186, 218, 255), -1)
-      end
-      add_hit(ui, "studio_code_line", text_x - 3, line_y - 3, code_w - 20, 13, { window_id = window.id, line = line_index, value = line, text_x = text_x })
-    end
-    if max_code_scroll > 0 then
-      local metrics = scrollbar.metrics(#lines, visible_lines, project.code_scroll, content_x + code_w - 5, code_body_y, code_body_h)
-      scrollbar.draw(ui.gpu, metrics, { track = rgb(30, 34, 42), thumb = rgb(90, 102, 122) })
-    end
-
+    local script_mode = mode == "script"
+    local preview_mode = mode == "preview"
+    local design_mode = not script_mode and not preview_mode
+    local side_w = script_mode and content_w or (preview_mode and 0 or math.max(92, math.min(118, math.floor(content_w * 0.34))))
+    local preview_x = script_mode and (content_x + content_w + 1) or (content_x + side_w + (side_w > 0 and 5 or 0))
+    local preview_w = script_mode and 0 or (content_w - side_w - (side_w > 0 and 5 or 0))
     local selected = project.components and project.components[project.selected or 0]
-    if selected then
-      local py = body_y + code_h + 4
-      rect(ui.gpu, content_x, py, code_w, prop_h, rgb(20, 24, 31))
-      draw_text(ui.gpu, content_x + 6, py + 5, ellipsize((selected.kind or "node") .. " " .. (selected.id or ""), math.floor((code_w - 12) / 6)), COLORS.white, -1)
-      local sx = content_x + 6
-      local controls = {
-        { label = "W-", dw = -6, dh = 0 },
-        { label = "W+", dw = 6, dh = 0 },
-        { label = "H-", dw = 0, dh = -4 },
-        { label = "H+", dw = 0, dh = 4 },
-      }
-      for _, control in ipairs(controls) do
-        local cy = py + 16
-        small_round(ui.gpu, sx, cy, 18, 10, rgb(62, 69, 82))
-        draw_text(ui.gpu, sx + 3, cy + 2, control.label, COLORS.white, -1)
-        add_hit(ui, "studio_resize", sx, cy, 18, 11, { index = project.selected, dw = control.dw, dh = control.dh })
-        sx = sx + 21
+
+    if not preview_mode then
+      rect(ui.gpu, content_x, body_y, side_w, body_h, rgb(8, 10, 14))
+      rect(ui.gpu, content_x, body_y, side_w, 14, rgb(15, 18, 24))
+      if script_mode then
+        draw_text(ui.gpu, content_x + 8, body_y + 4, "DockScript", rgb(205, 226, 255), -1)
+        local code = ctx.studio_service.sourceCode().data or project.code or ""
+        local lines = {}
+        for line in (tostring(code) .. "\n"):gmatch("(.-)\n") do table.insert(lines, line) end
+        local line_h = 10
+        local code_body_y = body_y + 16
+        local code_body_h = body_h - 18
+        local visible_lines = math.max(1, math.floor(code_body_h / line_h))
+        local max_code_scroll = math.max(0, #lines - visible_lines)
+        project.code_scroll = math.min(max_code_scroll, tonumber(project.code_scroll) or 0)
+        add_hit(ui, "studio_code_panel", content_x, code_body_y, side_w, code_body_h, { window_id = window.id })
+        for row = 1, visible_lines do
+          local line_index = row + (project.code_scroll or 0)
+          local line = lines[line_index]
+          if not line then break end
+          local line_y = code_body_y + (row - 1) * line_h
+          local text_x = content_x + 25
+          draw_text(ui.gpu, content_x + 5, line_y, tostring(line_index), rgb(84, 91, 104), -1)
+          local active = focused_input(ui, "studio_code", window.id) and ui.text_input and ui.text_input.extra and ui.text_input.extra.line == line_index
+          local line_key = input_id("studio_code", window.id)
+          local scroll_x = active and ui.text_input and ui.text_input.extra and ui.text_input.extra.scroll_x or 0
+          if active then rect(ui.gpu, text_x - 2, line_y - 2, side_w - 27, 11, rgb(238, 242, 248)) end
+          scroll_x = draw_code_line_editor(ui, text_x, line_y, side_w - 31, line, active, line_key, scroll_x)
+          if active and ui.text_input and ui.text_input.extra then ui.text_input.extra.scroll_x = scroll_x end
+          add_hit(ui, "studio_code_line", text_x - 3, line_y - 3, side_w - 20, 13, { window_id = window.id, line = line_index, value = line, text_x = text_x, scroll_x = scroll_x, char_w = CODE_CELL_W })
+        end
+        if max_code_scroll > 0 then
+          local metrics = scrollbar.metrics(#lines, visible_lines, project.code_scroll, content_x + side_w - 5, code_body_y, code_body_h)
+          scrollbar.draw(ui.gpu, metrics, { track = rgb(30, 34, 42), thumb = rgb(90, 102, 122) })
+        end
+      else
+        draw_text(ui.gpu, content_x + 8, body_y + 4, "Design", rgb(205, 226, 255), -1)
+        local tool_y = body_y + 18
+        local tools = {
+          { label = "Move", tool = "move" },
+          { label = "Add", tool = "add", kind = project.insert_kind or "button" },
+        }
+        local tx = content_x + 6
+        for _, tool in ipairs(tools) do
+          local bw = 34
+          small_round(ui.gpu, tx, tool_y, bw, 11, project.tool == tool.tool and COLORS.blue or rgb(55, 61, 72))
+          draw_text(ui.gpu, tx + 5, tool_y + 2, tool.label, COLORS.white, -1)
+          add_hit(ui, "studio_tool", tx, tool_y, bw, 12, tool)
+          tx = tx + bw + 4
+        end
+        local kind_y = tool_y + 15
+        local kinds = { "text", "button", "input", "shape", "image" }
+        local kx = content_x + 6
+        for _, kind in ipairs(kinds) do
+          local label = kind == "button" and "btn" or kind
+          local bw = math.max(23, #label * 6 + 8)
+          if kx + bw > content_x + side_w - 4 then kx = content_x + 6; kind_y = kind_y + 13 end
+          small_round(ui.gpu, kx, kind_y, bw, 11, project.insert_kind == kind and COLORS.red or rgb(49, 55, 66))
+          draw_text(ui.gpu, kx + 4, kind_y + 2, label, COLORS.white, -1)
+          add_hit(ui, "studio_tool", kx, kind_y, bw, 12, { tool = "add", kind = kind })
+          kx = kx + bw + 4
+        end
+        if selected then
+          local prop_y = kind_y + 18
+          draw_text(ui.gpu, content_x + 6, prop_y, ellipsize((selected.kind or "node") .. " " .. (selected.id or ""), math.floor((side_w - 12) / 6)), COLORS.white, -1)
+          local field = selected.kind == "text" and "text" or (selected.kind == "image" and "source" or "label")
+          local value = tostring(selected[field] or "")
+          local input_y = prop_y + 13
+          rect(ui.gpu, content_x + 6, input_y, side_w - 12, 12, rgb(238, 242, 248))
+          local active = focused_input(ui, "studio_prop", window.id)
+          local prop_key = input_id("studio_prop", window.id)
+          draw_text_editor(ui, content_x + 10, input_y + 3, side_w - 20, value, active, prop_key, COLORS.black, -1)
+          add_hit(ui, "studio_prop_field", content_x + 6, input_y, side_w - 12, 13, { window_id = window.id, field = field, value = value, text_x = content_x + 10 })
+          local sx = content_x + 6
+          local sy = input_y + 17
+          local controls = {
+            { label = "W-", dw = -6, dh = 0 },
+            { label = "W+", dw = 6, dh = 0 },
+            { label = "H-", dw = 0, dh = -4 },
+            { label = "H+", dw = 0, dh = 4 },
+          }
+          for _, control in ipairs(controls) do
+            small_round(ui.gpu, sx, sy, 18, 10, rgb(62, 69, 82))
+            draw_text(ui.gpu, sx + 3, sy + 2, control.label, COLORS.white, -1)
+            add_hit(ui, "studio_resize", sx, sy, 18, 11, { index = project.selected, dw = control.dw, dh = control.dh })
+            sx = sx + 21
+          end
+        end
       end
     end
+
+    if script_mode then return end
 
     local viewport_x, viewport_y = preview_x, body_y
     local viewport_w, viewport_h = preview_w, body_h
@@ -1279,7 +1365,7 @@ function M.new(ctx)
         draw_text(ui.gpu, math.max(viewport_x + 2, app_x + 42), app_y + 6, ellipsize(project.name, math.floor((viewport_x + viewport_w - math.max(viewport_x + 2, app_x + 42)) / 6)), COLORS.white, -1)
       end
     end
-    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, titlebar_h = 22, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
+    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, titlebar_h = 22, mode = mode, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
     for index, component in ipairs(project.components or {}) do
       local cx = app_x + (component.x or 1)
       local cy = app_y + 22 + (component.y or 1)
@@ -1292,7 +1378,9 @@ function M.new(ctx)
         local draw_w = math.max(1, math.min(cx + cw, viewport_x + viewport_w - 2) - draw_x + 1)
         local draw_h = math.max(1, math.min(cy + ch, viewport_y + viewport_h - 2) - draw_y + 1)
         draw_studio_component(ui, component, draw_x, draw_y, draw_w, draw_h, index == project.selected, false)
-        add_hit(ui, "studio_component", draw_x, draw_y, draw_w, draw_h, { index = index, app_x = app_x, app_y = app_y, titlebar_h = 22 })
+        if design_mode and (project.tool or "move") == "move" then
+          add_hit(ui, "studio_component", draw_x, draw_y, draw_w, draw_h, { index = index, app_x = app_x, app_y = app_y, titlebar_h = 22 })
+        end
       end
     end
     outline(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(142, 149, 162))
@@ -1408,13 +1496,15 @@ function M.new(ctx)
       if button == 1 then ui.selecting = { x1 = x, y1 = y, x2 = x, y2 = y } end
       return
     end
-      if ui.text_input and ui.text_input.kind == "explorer_rename" and hit.id ~= "explorer_rename" then
-        finish_text_input(ui, true)
-      elseif ui.text_input and ui.text_input.kind == "explorer_search" and hit.id ~= "explorer_search" then
-        finish_text_input(ui, true)
-      elseif ui.text_input and ui.text_input.kind == "studio_code" and hit.id ~= "studio_code_line" then
-        finish_text_input(ui, true)
-      end
+    if ui.text_input and ui.text_input.kind == "explorer_rename" and hit.id ~= "explorer_rename" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "explorer_search" and hit.id ~= "explorer_search" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "studio_code" and hit.id ~= "studio_code_line" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "studio_prop" and hit.id ~= "studio_prop_field" then
+      finish_text_input(ui, true)
+    end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
     elseif hit.id == "top_menu" then
       if hit.payload and hit.payload.action == "system" then ui.menu = not ui.menu; ui.context = nil else ctx.menu_service.dispatch(hit.payload and hit.payload.app_id, hit.payload and hit.payload.action, {}) end
@@ -1496,18 +1586,33 @@ function M.new(ctx)
         open_window(ui, project.id)
       end
     elseif hit.id == "studio_example" then ctx.studio_service.loadExample(hit.payload)
-      elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
-      elseif hit.id == "studio_insert" then ctx.studio_service.addComponent(hit.payload)
-      elseif hit.id == "studio_resize" then ctx.studio_service.resizeComponent(hit.payload.index, hit.payload.dw, hit.payload.dh)
-      elseif hit.id == "studio_code_line" then
-        local id = focus_text_input(ui, "studio_code", hit.payload.window_id, hit.payload.value or "", #tostring(hit.payload.value or ""), { line = hit.payload.line })
-        ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, 6, false)
-        sync_text_input(ui)
-        ui.dragging_text = { input_id = id, kind = "studio_code", window_id = hit.payload.window_id, text_x = hit.payload.text_x }
-      elseif hit.id == "studio_component" then
-        ctx.studio_service.selectComponent(hit.payload.index)
-        local titlebar_h = hit.payload.titlebar_h or 22
-        ui.dragging_studio = { index = hit.payload.index, titlebar_h = titlebar_h, dx = x - (hit.payload.app_x + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).x or 0)), dy = y - (hit.payload.app_y + titlebar_h + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).y or 0)), app_x = hit.payload.app_x, app_y = hit.payload.app_y }
+    elseif hit.id == "studio_mode" then ctx.studio_service.setMode(hit.payload)
+    elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
+    elseif hit.id == "studio_insert" then ctx.studio_service.setMode("design"); ctx.studio_service.setTool("add", hit.payload)
+    elseif hit.id == "studio_tool" then ctx.studio_service.setTool(hit.payload.tool, hit.payload.kind)
+    elseif hit.id == "studio_resize" then ctx.studio_service.resizeComponent(hit.payload.index, hit.payload.dw, hit.payload.dh)
+    elseif hit.id == "studio_prop_field" then
+      local id = focus_text_input(ui, "studio_prop", hit.payload.window_id, hit.payload.value or "", #tostring(hit.payload.value or ""), { field = hit.payload.field })
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, CELL_W, false)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = "studio_prop", window_id = hit.payload.window_id, text_x = hit.payload.text_x, char_w = CELL_W }
+    elseif hit.id == "studio_code_line" then
+      local scroll_x = hit.payload.scroll_x or 0
+      local id = focus_text_input(ui, "studio_code", hit.payload.window_id, hit.payload.value or "", #tostring(hit.payload.value or ""), { line = hit.payload.line, scroll_x = scroll_x })
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, hit.payload.char_w or CODE_CELL_W, false, scroll_x)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = "studio_code", window_id = hit.payload.window_id, text_x = hit.payload.text_x, char_w = hit.payload.char_w or CODE_CELL_W, scroll_x = scroll_x }
+    elseif hit.id == "studio_preview" then
+      local project = ctx.studio_service.current().data
+      if (project.mode or "design") == "design" and (project.tool or "move") == "add" then
+        local app_x = math.floor(x - hit.payload.app_x)
+        local app_y = math.floor(y - hit.payload.app_y - (hit.payload.titlebar_h or 22))
+        if app_y >= 1 then ctx.studio_service.addComponent(project.insert_kind or "button", app_x, app_y) end
+      end
+    elseif hit.id == "studio_component" then
+      ctx.studio_service.selectComponent(hit.payload.index)
+      local titlebar_h = hit.payload.titlebar_h or 22
+      ui.dragging_studio = { index = hit.payload.index, titlebar_h = titlebar_h, dx = x - (hit.payload.app_x + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).x or 0)), dy = y - (hit.payload.app_y + titlebar_h + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).y or 0)), app_x = hit.payload.app_x, app_y = hit.payload.app_y }
     elseif hit.id == "app_component_button" then
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch("dock_app_event", hit.payload) end
       local runtime = ctx.app_runtime_service and ctx.app_runtime_service.stateForApp and ctx.app_runtime_service.stateForApp(hit.payload.app_id).data
@@ -1522,6 +1627,33 @@ function M.new(ctx)
         ui.dragging_window = { id = window.id, dx = x - window.x, dy = y - window.y }
       end
     end
+  end
+
+  local function script_lines()
+    local project = ctx.studio_service.current().data
+    local lines = {}
+    for line in (tostring(project.script or "") .. "\n"):gmatch("(.-)\n") do table.insert(lines, line) end
+    if #lines == 0 then table.insert(lines, "") end
+    return lines
+  end
+
+  local function focus_script_line(ui, input, line_index, cursor)
+    local lines = script_lines()
+    line_index = math.max(1, math.min(#lines, math.floor(tonumber(line_index) or 1)))
+    local value = lines[line_index] or ""
+    cursor = math.max(0, math.min(#value, math.floor(tonumber(cursor) or #value)))
+    focus_text_input(ui, "studio_code", input.window_id, value, cursor, { line = line_index, scroll_x = 0 })
+  end
+
+  local function move_script_line(ui, input, input_state_id, delta)
+    if input.kind ~= "studio_code" then return false end
+    sync_text_input(ui)
+    local view = ctx.text_input_service.view(input_state_id).data or { cursor = 0 }
+    local lines = script_lines()
+    local target = ((input.extra and input.extra.line) or 1) + delta
+    if target < 1 or target > #lines then return true end
+    focus_script_line(ui, input, target, view.cursor or 0)
+    return true
   end
 
   local function handle_text_input(ui, event, a, b)
@@ -1549,13 +1681,37 @@ function M.new(ctx)
       if ui.modifiers.ctrl and keys and a == keys.x then ctx.text_input_service.cut(id); sync_text_input(ui); return true end
       if ui.modifiers.ctrl and keys and a == keys.v then ctx.text_input_service.paste(id); sync_text_input(ui); return true end
       if ui.modifiers.ctrl and keys and a == keys.a then ctx.text_input_service.selectAll(id); return true end
+      if keys and a == keys.backspace and input.kind == "studio_code" then
+        local view = ctx.text_input_service.view(id).data
+        if view and tostring(view.value or "") == "" and input.extra and (input.extra.line or 1) > 1 then
+          local previous_line = (input.extra.line or 1) - 1
+          ctx.studio_service.deleteScriptLine(input.extra.line)
+          local project = ctx.studio_service.current().data
+          local lines = {}
+          for line in (tostring(project.script or "") .. "\n"):gmatch("(.-)\n") do table.insert(lines, line) end
+          local previous_value = lines[previous_line] or ""
+          focus_text_input(ui, "studio_code", input.window_id, previous_value, #previous_value, { line = previous_line, scroll_x = 0 })
+          return true
+        end
+      end
       if keys and a == keys.backspace then ctx.text_input_service.backspace(id); sync_text_input(ui); return true end
       if keys and a == keys.delete then ctx.text_input_service.delete(id); sync_text_input(ui); return true end
       if keys and a == keys.left then ctx.text_input_service.move(id, -1, ui.modifiers.shift); return true end
       if keys and a == keys.right then ctx.text_input_service.move(id, 1, ui.modifiers.shift); return true end
+      if keys and a == keys.up and move_script_line(ui, input, id, -1) then return true end
+      if keys and a == keys.down and move_script_line(ui, input, id, 1) then return true end
       if keys and a == keys.home then ctx.text_input_service.set(id, ctx.text_input_service.view(id).data.value, 0); return true end
       if keys and a == keys["end"] then local view = ctx.text_input_service.view(id).data; ctx.text_input_service.set(id, view.value, #view.value); return true end
-      if keys and (a == keys.enter or a == keys.numPadEnter) then finish_text_input(ui, true); return true end
+      if keys and (a == keys.enter or a == keys.numPadEnter) then
+        if input.kind == "studio_code" then
+          sync_text_input(ui)
+          local next_line = ((input.extra and input.extra.line) or 1) + 1
+          ctx.studio_service.insertScriptLine(next_line, "")
+          focus_text_input(ui, "studio_code", input.window_id, "", 0, { line = next_line, scroll_x = 0 })
+          return true
+        end
+        finish_text_input(ui, true); return true
+      end
       if keys and a == keys.escape then finish_text_input(ui, false); return true end
     elseif event == "tm_keyboard_key" then
       local key = b or a
@@ -1563,13 +1719,37 @@ function M.new(ctx)
       if ui.modifiers.ctrl and keys and key == keys.x then ctx.text_input_service.cut(id); sync_text_input(ui); return true end
       if ui.modifiers.ctrl and keys and key == keys.v then ctx.text_input_service.paste(id); sync_text_input(ui); return true end
       if ui.modifiers.ctrl and keys and key == keys.a then ctx.text_input_service.selectAll(id); return true end
+      if keys and key == keys.backspace and input.kind == "studio_code" then
+        local view = ctx.text_input_service.view(id).data
+        if view and tostring(view.value or "") == "" and input.extra and (input.extra.line or 1) > 1 then
+          local previous_line = (input.extra.line or 1) - 1
+          ctx.studio_service.deleteScriptLine(input.extra.line)
+          local project = ctx.studio_service.current().data
+          local lines = {}
+          for line in (tostring(project.script or "") .. "\n"):gmatch("(.-)\n") do table.insert(lines, line) end
+          local previous_value = lines[previous_line] or ""
+          focus_text_input(ui, "studio_code", input.window_id, previous_value, #previous_value, { line = previous_line, scroll_x = 0 })
+          return true
+        end
+      end
       if keys and key == keys.backspace then ctx.text_input_service.backspace(id); sync_text_input(ui); return true end
       if keys and key == keys.delete then ctx.text_input_service.delete(id); sync_text_input(ui); return true end
       if keys and key == keys.left then ctx.text_input_service.move(id, -1, ui.modifiers.shift); return true end
       if keys and key == keys.right then ctx.text_input_service.move(id, 1, ui.modifiers.shift); return true end
+      if keys and key == keys.up and move_script_line(ui, input, id, -1) then return true end
+      if keys and key == keys.down and move_script_line(ui, input, id, 1) then return true end
       if keys and key == keys.home then ctx.text_input_service.set(id, ctx.text_input_service.view(id).data.value, 0); return true end
       if keys and key == keys["end"] then local view = ctx.text_input_service.view(id).data; ctx.text_input_service.set(id, view.value, #view.value); return true end
-      if keys and (key == keys.enter or key == keys.numPadEnter) then finish_text_input(ui, true); return true end
+      if keys and (key == keys.enter or key == keys.numPadEnter) then
+        if input.kind == "studio_code" then
+          sync_text_input(ui)
+          local next_line = ((input.extra and input.extra.line) or 1) + 1
+          ctx.studio_service.insertScriptLine(next_line, "")
+          focus_text_input(ui, "studio_code", input.window_id, "", 0, { line = next_line, scroll_x = 0 })
+          return true
+        end
+        finish_text_input(ui, true); return true
+      end
       if keys and key == keys.escape then finish_text_input(ui, false); return true end
     end
     return false
@@ -1614,13 +1794,13 @@ function M.new(ctx)
 
   local function handle_scroll(ui, button, x, y)
     local hit = hit_at(ui, x, y)
-      if hit and (hit.id == "studio_code_panel" or hit.id == "studio_code_line") then
-        ctx.studio_service.scrollCode(button or 0)
-        return true
-      end
-      if hit and hit.id == "studio_preview" then
-        if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
-        return true
+    if hit and (hit.id == "studio_code_panel" or hit.id == "studio_code_line") then
+      ctx.studio_service.scrollCode(button or 0)
+      return true
+    end
+    if hit and hit.id == "studio_preview" then
+      if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
+      return true
     end
     local window = active_window(ui)
     if window and window.app_id == "dock.settings" then settings_scroll(ui, button); return true end
@@ -1654,10 +1834,10 @@ function M.new(ctx)
           handle_action(ui, hit_at(ui, x, y), button, x, y)
         elseif mapped == "mouse_drag" then
           if ui.dragging_text then
-            ctx.text_input_service.cursorFromX(ui.dragging_text.input_id, x, ui.dragging_text.text_x, 6, true)
+            ctx.text_input_service.cursorFromX(ui.dragging_text.input_id, x, ui.dragging_text.text_x, ui.dragging_text.char_w or CELL_W, true, ui.dragging_text.scroll_x or 0)
             sync_text_input(ui)
-            elseif ui.dragging_studio then
-              ctx.studio_service.moveComponent(ui.dragging_studio.index, x - ui.dragging_studio.app_x - ui.dragging_studio.dx, y - ui.dragging_studio.app_y - (ui.dragging_studio.titlebar_h or 22) - ui.dragging_studio.dy)
+          elseif ui.dragging_studio then
+            ctx.studio_service.moveComponent(ui.dragging_studio.index, x - ui.dragging_studio.app_x - ui.dragging_studio.dx, y - ui.dragging_studio.app_y - (ui.dragging_studio.titlebar_h or 22) - ui.dragging_studio.dy)
           elseif ui.dragging_file then
             if math.abs(x - ui.dragging_file.start_x) + math.abs(y - ui.dragging_file.start_y) > 5 then ui.dragging_file.active = true end
           elseif ui.dragging_window then

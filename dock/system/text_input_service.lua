@@ -52,9 +52,11 @@ function M.new()
     return ok(item)
   end
 
-  function service.cursorFromX(id, x, text_x, char_width, keep_selection)
+  function service.cursorFromX(id, x, text_x, char_width, keep_selection, offset)
     local item = state(id)
-    local position = clamp(math.floor(((tonumber(x) or text_x) - (tonumber(text_x) or 0)) / (tonumber(char_width) or 6) + 0.5), 0, #item.value)
+    offset = math.max(0, math.floor(tonumber(offset) or 0))
+    local position = offset + math.floor(((tonumber(x) or text_x) - (tonumber(text_x) or 0)) / (tonumber(char_width) or 6) + 0.5)
+    position = clamp(position, 0, #item.value)
     if keep_selection and not item.selection_anchor then item.selection_anchor = item.cursor end
     set_cursor(item, position, keep_selection)
     return ok(item)

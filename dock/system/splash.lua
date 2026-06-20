@@ -60,7 +60,7 @@ function M.draw(gpu, options)
   if gpu.fill then pcall(gpu.fill, BLACK) else rect(gpu, 1, 1, width, height, BLACK) end
 
   local logo = options.logo or "DockOS"
-  local logo_width = #logo * 13
+  local logo_width = #logo * 6
   local logo_x = math.max(1, math.floor((width - logo_width) / 2))
   local logo_y = math.max(12, math.floor(height * 0.38))
   draw_text(gpu, logo_x, logo_y, logo, WHITE)
@@ -68,7 +68,7 @@ function M.draw(gpu, options)
   local bar_width = math.max(58, math.min(190, math.floor(width * 0.42)))
   local bar_height = math.max(2, math.min(5, math.floor(height * 0.018)))
   local bar_x = math.floor((width - bar_width) / 2)
-  local bar_y = logo_y + math.max(24, math.floor(height * 0.12))
+  local bar_y = logo_y + math.max(18, math.floor(height * 0.10))
   rect(gpu, bar_x, bar_y, bar_width, bar_height, GRAY)
   rect(gpu, bar_x, bar_y, math.max(1, math.floor(bar_width * math.max(0, math.min(100, options.progress or 0)) / 100)), bar_height, WHITE)
 

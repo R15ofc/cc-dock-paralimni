@@ -41,6 +41,7 @@ function M.new(ctx)
       current = version.codename .. " " .. version.version,
       available = nil,
       error = nil,
+      progress = 0,
       started_at = 0,
     },
   }
@@ -78,6 +79,7 @@ function M.new(ctx)
       current = version.codename .. " " .. version.version,
       available = nil,
       error = nil,
+      progress = 0,
       started_at = os.clock and os.clock() or 0,
     }
     return ok(service.state)
@@ -140,6 +142,7 @@ function M.new(ctx)
       return err("installer runtime unavailable", "UNAVAILABLE")
     end
     service.state.status = "installing"
+    service.state.progress = 8
     splash.sequence({
       logo = "DockOS",
       message = "Please do not turn off your computer",
@@ -153,6 +156,7 @@ function M.new(ctx)
       return err(request_error or "installer download failed", "DOWNLOAD_FAILED")
     end
     local installer_path = "/tmp/dock-update-installer.lua"
+    service.state.progress = 48
     if fs.exists(installer_path) then fs.delete(installer_path) end
     local out = fs.open(installer_path, "w")
     if not out then
@@ -163,10 +167,14 @@ function M.new(ctx)
     out.write(handle.readAll() or "")
     out.close()
     handle.close()
+    service.state.progress = 72
     splash.show({ logo = "DockOS", message = "Please do not turn off your computer", progress = 72 })
     shell.run(installer_path, source)
-    splash.show({ logo = "DockOS", message = "Please do not turn off your computer", progress = 100 })
+    service.state.progress = 100
+    splash.show({ logo = "DockOS", message = "Restarting", progress = 100 })
     service.state.status = "installed"
+    if sleep then sleep(0.35) end
+    if os and os.reboot then os.reboot() end
     return ok(service.state)
   end
 
