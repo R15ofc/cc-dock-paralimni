@@ -1,6 +1,7 @@
 local paths = require("dock.system.paths")
 local json = require("dock.system.json")
 local loading = require("dock.system.loading")
+local scrollbar = require("dock.system.scrollbar")
 local splash = require("dock.system.splash")
 
 return {
@@ -92,6 +93,8 @@ return {
     local restored_explorer = trashed.ok and ctx.fs_service.restoreFromTrash(trashed.data.id)
     check("explorer trash/restore", restored_explorer and restored_explorer.ok and fs.exists(moved.data))
     check("loading helper", loading.spinner(0) == "|" and loading.progress(50, 4):match("^##%-%-") ~= nil)
+    local scroll_metrics = scrollbar.metrics(10, 4, 2, 1, 1, 40)
+    check("scrollbar helper", scroll_metrics.enabled and scrollbar.offsetFromY(scroll_metrics, scroll_metrics.thumb_y) >= 0)
     local fake_gpu = {
       filledRectangle = function() end,
       drawText = function() end,

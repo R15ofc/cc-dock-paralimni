@@ -8,7 +8,7 @@ local FILES = {
   "dock/system/net_service.lua", "dock/system/notification_service.lua", "dock/system/time_service.lua", "dock/system/ipc_service.lua",
   "dock/system/window_service.lua", "dock/system/permission_service.lua", "dock/system/app_runtime_service.lua",
   "dock/system/explorer_service.lua", "dock/system/cursor_service.lua", "dock/system/text_input_service.lua", "dock/system/menu_service.lua",
-  "dock/system/studio_service.lua", "dock/system/loading.lua", "dock/system/splash.lua", "dock/system/update_service.lua",
+  "dock/system/studio_service.lua", "dock/system/loading.lua", "dock/system/scrollbar.lua", "dock/system/splash.lua", "dock/system/update_service.lua",
   "dock/system/shell_service.lua", "dock/system/kernel.lua", "dock/system/boot.lua",
   "dock/apps/system/files/app.json", "dock/apps/system/files/main.lua",
   "dock/apps/system/terminal/app.json", "dock/apps/system/terminal/main.lua",

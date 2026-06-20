@@ -1,6 +1,7 @@
 local paths = require("dock.system.paths")
 local tom = require("dock.system.tom_adapter")
 local loading = require("dock.system.loading")
+local scrollbar = require("dock.system.scrollbar")
 
 local M = {}
 local unpacker = table.unpack or unpack
@@ -146,6 +147,13 @@ local function image_from_file(gpu, path, cache)
 end
 
 local function pixel_event(event, a, b, c, d)
+  if event == "mouse_scroll" then
+    return event, a or 0, ((b or 1) - 1) * CELL_W + 1, ((c or 1) - 1) * CELL_H + 1
+  end
+  if event == "tm_monitor_mouse_scroll" then
+    if type(a) == "string" then return "mouse_scroll", b or 0, c or 1, d or 1 end
+    return "mouse_scroll", a or 0, b or 1, c or 1
+  end
   if event == "mouse_click" or event == "mouse_drag" or event == "mouse_up" then
     return event, a or 1, ((b or 1) - 1) * CELL_W + 1, ((c or 1) - 1) * CELL_H + 1
   end
@@ -192,8 +200,8 @@ local function ellipsize(text, max_chars)
   text = tostring(text or "")
   max_chars = math.max(1, tonumber(max_chars) or #text)
   if #text <= max_chars then return text end
-  if max_chars <= 1 then return "…" end
-  return text:sub(1, max_chars - 1) .. "…"
+  if max_chars <= 3 then return text:sub(1, max_chars) end
+  return text:sub(1, max_chars - 3) .. "..."
 end
 
 local function format_size(size)
@@ -485,12 +493,10 @@ function M.new(ctx)
   end
 
   local function draw_top(ui)
-    rect(ui.gpu, 1, 1, 6, 6, COLORS.black)
-    add_hit(ui, "system_menu", 1, 1, 12, 12)
-    local x = 13
+    local x = 5
     local app_id = active_app_id(ui)
     local menu = ctx.menu_service.menuFor(app_id).data or {}
-    table.insert(menu, 1, { id = "about", label = "About" })
+    table.insert(menu, 1, { id = "system", label = "About" })
     for _, item in ipairs(menu) do
       local label = item.label
       local width = (#label * 6) + 8
@@ -527,10 +533,11 @@ function M.new(ctx)
   end
 
   local function current_settings(ui)
-    ui.settings = ui.settings or { route = "general", history = {}, future = {} }
+    ui.settings = ui.settings or { route = "general", history = {}, future = {}, scroll = {} }
     ui.settings.route = ui.settings.route or "general"
     ui.settings.history = ui.settings.history or {}
     ui.settings.future = ui.settings.future or {}
+    ui.settings.scroll = ui.settings.scroll or {}
     return ui.settings
   end
 
@@ -557,6 +564,12 @@ function M.new(ctx)
     if not next_route then return end
     table.insert(settings.history, settings.route)
     settings.route = next_route
+  end
+
+  local function settings_scroll(ui, delta)
+    local settings = current_settings(ui)
+    local route = settings.route
+    settings.scroll[route] = math.max(0, (tonumber(settings.scroll[route]) or 0) + (tonumber(delta) or 0))
   end
 
   local function settings_title(route)
@@ -632,7 +645,7 @@ function M.new(ctx)
       draw_icon_square(ui, x, y, app, active == app.manifest.id)
       x = x + 20
     end
-    draw_text(ui.gpu, math.max(dock_x + 10, ui.width - 86), dock_y + 8, "DockOS 0.0.1", COLORS.white, -1)
+    draw_text(ui.gpu, math.max(dock_x + 10, ui.width - 86), dock_y + 8, "DockOS " .. ctx.version.version, COLORS.white, -1)
   end
 
   local function draw_menu(ui)
@@ -652,9 +665,9 @@ function M.new(ctx)
     local x, y = math.floor((ui.width - w) / 2), math.floor((ui.height - h) / 2)
     outline(ui.gpu, x, y, w, h, COLORS.white)
     draw_text(ui.gpu, x + 10, y + 10, "DockOS", COLORS.white, -1)
-    draw_text(ui.gpu, x + 10, y + 24, "Type: " .. terminal_type(), COLORS.white, -1)
+    draw_text(ui.gpu, x + 10, y + 24, "Edition: " .. tostring(ctx.version.edition or "Basic"), COLORS.white, -1)
     draw_text(ui.gpu, x + 10, y + 36, "Monitor Size: " .. block_size(ui.width, ui.height) .. " (" .. ui.width .. "x" .. ui.height .. ")", COLORS.white, -1)
-    draw_text(ui.gpu, x + 10, y + 48, "DockOS Version: Paralimni 0.0.1", COLORS.white, -1)
+    draw_text(ui.gpu, x + 10, y + 48, "DockOS: " .. ctx.version.codename .. " " .. ctx.version.version, COLORS.white, -1)
     add_hit(ui, "about_close", x, y, w, h)
   end
 
@@ -845,7 +858,7 @@ function M.new(ctx)
     local status_y = content_y + content_h - 10
     rect(ui.gpu, main_x, status_y - 2, main_w, 10, rgb(24, 28, 33))
     if data.selected then
-      local status = data.selected.name .. " · " .. (data.selected.dir and "folder" or format_size(data.selected.size)) .. " · " .. tostring(data.selected.type)
+      local status = data.selected.name .. " | " .. (data.selected.dir and "folder" or format_size(data.selected.size)) .. " | " .. tostring(data.selected.type)
       draw_text(ui.gpu, main_x + 5, status_y, ellipsize(status, math.floor((main_w - 10) / 6)), COLORS.white, -1)
     elseif data.clipboard then
       draw_text(ui.gpu, main_x + 5, status_y, "Clipboard: " .. data.clipboard.action .. " " .. data.clipboard.name, COLORS.white, -1)
@@ -879,9 +892,9 @@ function M.new(ctx)
     local route = settings.route
     local rail_w = math.max(54, math.min(96, math.floor(content_w * 0.34)))
     rail_w = math.min(rail_w, math.max(50, content_w - 70))
-    local main_x = content_x
+    local rail_x = content_x
+    local main_x = content_x + rail_w + 5
     local main_w = content_w - rail_w - 5
-    local rail_x = content_x + content_w - rail_w
     rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(238, 241, 245))
     rect(ui.gpu, rail_x, content_y, rail_w, content_h, rgb(31, 34, 40))
 
@@ -911,7 +924,6 @@ function M.new(ctx)
     if route == "general" then
       draw_text(ui.gpu, body_x, body_y, "Categories", rgb(84, 88, 94), -1)
       draw_settings_button(ui, "settings_sub", body_x, body_y + 15, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 36, body_w, 17, "Accessibility", "accessibility", rgb(250, 250, 252))
       return
     elseif route == "appearance" then
       local themes = { "Blue", "Red", "Green", "White", "Dark" }
@@ -961,7 +973,7 @@ function M.new(ctx)
       local card_h = 49
       draw_settings_card(ui, body_x, body_y, body_w, card_h)
       draw_text(ui.gpu, body_x + 10, body_y + 6, "Computer Info", COLORS.black, -1)
-      draw_settings_row(ui, "Type", terminal_type(), body_x + 10, body_y + 18, body_w - 20)
+      draw_settings_row(ui, "Edition", tostring(ctx.version.edition or "Basic"), body_x + 10, body_y + 18, body_w - 20)
       draw_settings_row(ui, "Memory", "-", body_x + 10, body_y + 29, body_w - 20)
       draw_settings_row(ui, "Storage", "-", body_x + 10, body_y + 40, body_w - 20, false)
       local dock_card_y = body_y + card_h + 6
@@ -979,9 +991,28 @@ function M.new(ctx)
       draw_settings_row(ui, "Used", used_label, body_x + 10, body_y + 23, body_w - 20)
       draw_settings_row(ui, "Available", free_label, body_x + 10, body_y + 36, body_w - 20)
     elseif route == "accessibility" then
-      draw_settings_card(ui, body_x, body_y, body_w, 44)
-      draw_text(ui.gpu, body_x + 10, body_y + 9, "Accessibility", COLORS.black, -1)
-      draw_text(ui.gpu, body_x + 10, body_y + 24, ellipsize("Display and input options will be here.", math.floor((body_w - 20) / 6)), rgb(84, 88, 94), -1)
+      local options = {
+        { label = "Text Size", value = tostring(ctx.settings_service.get("user.accessibility.text_size", "Normal").data) },
+        { label = "Cursor Size", value = tostring(ctx.settings_service.get("user.accessibility.cursor_size", "Normal").data) },
+        { label = "Contrast", value = tostring(ctx.settings_service.get("user.accessibility.contrast", "Standard").data) },
+        { label = "Reduce Motion", value = tostring(ctx.settings_service.get("user.accessibility.reduce_motion", "Off").data) },
+        { label = "Reduce Transparency", value = tostring(ctx.settings_service.get("user.accessibility.reduce_transparency", "Off").data) },
+        { label = "Button Labels", value = tostring(ctx.settings_service.get("user.accessibility.button_labels", "On").data) },
+        { label = "Sound Feedback", value = tostring(ctx.settings_service.get("user.accessibility.sound_feedback", "Off").data) },
+      }
+      local visible = math.max(1, math.floor((content_y + content_h - body_y - 6) / 17))
+      local scroll = math.min(tonumber(settings.scroll.accessibility) or 0, math.max(0, #options - visible))
+      settings.scroll.accessibility = scroll
+      for index = 1, math.min(visible, #options) do
+        local option = options[index + scroll]
+        local row_y = body_y + ((index - 1) * 17)
+        draw_settings_card(ui, body_x, row_y, body_w - 8, 14)
+        draw_text(ui.gpu, body_x + 8, row_y + 4, ellipsize(option.label, math.floor((body_w - 68) / 6)), COLORS.black, -1)
+        draw_text(ui.gpu, body_x + body_w - 58, row_y + 4, ellipsize(option.value, 8), rgb(84, 88, 94), -1)
+      end
+      local metrics = scrollbar.metrics(#options, visible, scroll, body_x + body_w - 5, body_y, math.max(14, visible * 17 - 3))
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(220, 224, 230), thumb = rgb(110, 118, 128) })
+      if metrics.enabled then add_hit(ui, "settings_scrollbar", metrics.x - 3, metrics.y, 10, metrics.h, { route = "accessibility", metrics = metrics }) end
     else
       draw_text(ui.gpu, body_x, body_y, "Section unavailable", rgb(84, 88, 94), -1)
     end
@@ -1154,7 +1185,7 @@ function M.new(ctx)
     end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
     elseif hit.id == "top_menu" then
-      if hit.payload and hit.payload.action == "about" then ui.about = true else ctx.menu_service.dispatch(hit.payload and hit.payload.app_id, hit.payload and hit.payload.action, {}) end
+      if hit.payload and hit.payload.action == "system" then ui.menu = not ui.menu; ui.context = nil else ctx.menu_service.dispatch(hit.payload and hit.payload.app_id, hit.payload and hit.payload.action, {}) end
     elseif hit.id == "about" then ui.about = true; ui.menu = false
     elseif hit.id == "about_close" then ui.about = false
     elseif hit.id == "reboot" then os.reboot()
@@ -1204,6 +1235,9 @@ function M.new(ctx)
     elseif hit.id == "settings_forward" then settings_forward(ui)
     elseif hit.id == "settings_nav" then settings_go(ui, hit.payload)
     elseif hit.id == "settings_sub" then settings_go(ui, hit.payload)
+    elseif hit.id == "settings_scrollbar" then
+      local settings = current_settings(ui)
+      settings.scroll[hit.payload.route] = scrollbar.offsetFromY(hit.payload.metrics, y)
     elseif hit.id == "settings_theme" then ctx.settings_service.set("user.theme", hit.payload)
     elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
     elseif hit.id == "studio_new" then ctx.studio_service.newProject()
@@ -1299,11 +1333,17 @@ function M.new(ctx)
     return false
   end
 
+  local function needs_animation(ui)
+    local update = ctx.update_service and ctx.update_service.status().data
+    local update_status = update and update.status or "idle"
+    return ui.text_input ~= nil or update_status == "checking" or update_status == "installing"
+  end
+
   local function run_graphical(gpu, width, height)
     local ui = initial_ui_state(gpu, width, height)
     while true do
       render(ui)
-      if os.startTimer then os.startTimer(0.15) end
+      if needs_animation(ui) and os.startTimer then os.startTimer(0.25) end
       local event, a, b, c, d = os.pullEvent()
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
       if handle_modifier_key(ui, event, a, b) then
@@ -1313,7 +1353,7 @@ function M.new(ctx)
       elseif event == "key" and not ui.text_input and keys and a == keys.q then return { ok = true }
       else
         local mapped, button, x, y = pixel_event(event, a, b, c, d)
-        if (mapped == "mouse_click" or mapped == "mouse_drag" or mapped == "mouse_up" or mapped == "mouse_move") and ctx.cursor_service then
+        if (mapped == "mouse_click" or mapped == "mouse_drag" or mapped == "mouse_up" or mapped == "mouse_move" or mapped == "mouse_scroll") and ctx.cursor_service then
           ctx.cursor_service.setPosition(x, y)
           ui.cursor.x, ui.cursor.y = x, y
         end
@@ -1349,6 +1389,9 @@ function M.new(ctx)
           ui.dragging_window = nil
           ui.dragging_text = nil
           ui.selecting = nil
+        elseif mapped == "mouse_scroll" then
+          local window = active_window(ui)
+          if window and window.app_id == "dock.settings" then settings_scroll(ui, button) end
         elseif mapped == "peripheral" or mapped == "peripheral_detach" then
           ctx.device_service.scan()
         end
@@ -1361,7 +1404,7 @@ function M.new(ctx)
     term.setTextColor(colors.white)
     term.clear()
     term.setCursorPos(1, 1)
-    print("DockOS Paralimni 0.0.1")
+    print("DockOS " .. ctx.version.codename .. " " .. ctx.version.version)
     print("No bitmap GPU detected. Use dock help for commands.")
     service.printHelp()
     return { ok = true }
