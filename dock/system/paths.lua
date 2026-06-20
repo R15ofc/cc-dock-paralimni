@@ -43,6 +43,14 @@ function M.appConfig(user_id, app_id)
   return join(M.userConfig(user_id), "apps", tostring(app_id) .. ".json")
 end
 
+function M.appData(user_id, app_id)
+  return join(M.userHome(user_id), ".local", "share", "apps", tostring(app_id))
+end
+
+function M.appCache(user_id, app_id)
+  return join(M.cache, "apps", tostring(user_id or "default"), tostring(app_id))
+end
+
 M.user_folders = {
   Desktop = "Desktop",
   Documents = "Documents",
@@ -73,8 +81,10 @@ M.required_dirs = {
   join(M.userConfig("default"), "apps"),
   join(M.userHome("default"), ".local"),
   join(M.userHome("default"), ".local", "share"),
+  join(M.userHome("default"), ".local", "share", "apps"),
   join(M.userHome("default"), ".local", "share", "applications"),
   join(M.userHome("default"), ".local", "share", "metadata"),
+  join(M.cache, "apps"),
 }
 
 for _, folder in pairs(M.user_folders) do

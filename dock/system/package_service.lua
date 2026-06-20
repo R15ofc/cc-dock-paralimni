@@ -28,6 +28,10 @@ function M.new(ctx)
     if not manifest_read.ok then return manifest_read end
     local valid = ctx.app_service.validateManifest(manifest_read.data)
     if not valid.ok then return valid end
+    if ctx.permission_service then
+      local permissions = ctx.permission_service.validateManifest(valid.data)
+      if not permissions.ok then return permissions end
+    end
     local target = fs.combine(paths.installed_apps, valid.data.id)
     if fs.exists(target) then fs.delete(target) end
     local copied = copy_dir(path, target)

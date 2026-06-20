@@ -51,6 +51,12 @@ return {
     end)
     local sent = receiver.ok and ctx.ipc_service.send("selftest", receiver.data.pid, "ping", { text = "hello" })
     check("ipc service", sent and sent.ok and ctx.ipc_service.receive(receiver.data.pid).data.kind == "ping")
+    local permission = ctx.permission_service.check("dock.files", "fs.read")
+    check("permission service", permission.ok and permission.data == true and not ctx.permission_service.validateManifest({ id = "bad", permissions = { "unknown.permission" } }).ok)
+    local granted = ctx.permission_service.grant("selftest.app", "ipc.message")
+    check("permission grant", granted.ok and ctx.permission_service.check("selftest.app", "ipc.message").data == true)
+    local runtime = ctx.app_runtime_service.launch("dock.files", {})
+    check("app runtime", runtime.ok and runtime.data.pid ~= nil and runtime.data.app_id == "dock.files")
 
     local passed = 0
     for _, item in ipairs(checks) do

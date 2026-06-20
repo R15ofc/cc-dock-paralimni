@@ -193,6 +193,8 @@ function M.new(ctx)
   function service.printHelp()
     safe_print("dock about | version | services | ps | devices | apps")
     safe_print("dock time | timezone <offset> | windows")
+    safe_print("dock runtime | stop <instance_or_pid>")
+    safe_print("dock permissions <app_id> | grant <app_id> <permission> | revoke <app_id> <permission>")
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
@@ -229,6 +231,28 @@ function M.new(ctx)
       for _, window in ipairs(ctx.window_service.list().data) do
         safe_print(window.id .. " " .. window.app_id .. " " .. (window.minimized and "minimized" or "visible"))
       end
+    elseif command == "runtime" then
+      for _, instance in ipairs(ctx.app_runtime_service.list().data) do
+        safe_print(tostring(instance.id) .. " pid=" .. tostring(instance.pid) .. " " .. instance.state .. " " .. instance.app_id)
+      end
+    elseif command == "stop" then
+      return print_result(ctx.app_runtime_service.stop(args[2]))
+    elseif command == "permissions" then
+      local result = ctx.permission_service.list(args[2])
+      if args[2] then
+        safe_print("requested: " .. table.concat(result.data.requested or {}, ","))
+        safe_print("granted: " .. table.concat(result.data.granted or {}, ","))
+        safe_print("denied: " .. table.concat(result.data.denied or {}, ","))
+      else
+        for app_id, record in pairs(result.data or {}) do
+          safe_print(app_id .. " granted=" .. tostring(#(record.granted or {})) .. " requested=" .. tostring(#(record.requested or {})))
+        end
+      end
+      return result
+    elseif command == "grant" then
+      return print_result(ctx.permission_service.grant(args[2], args[3]))
+    elseif command == "revoke" then
+      return print_result(ctx.permission_service.revoke(args[2], args[3]))
     elseif command == "ipc" and args[2] == "send" then
       return print_result(ctx.ipc_service.send("shell", tonumber(args[3]), args[4] or "message", { text = join_words(args, 5) }))
     elseif command == "ipc" and args[2] == "inbox" then

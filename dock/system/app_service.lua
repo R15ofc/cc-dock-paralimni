@@ -22,7 +22,10 @@ local function scan_base(service, base)
     if fs.isDir(dir) and fs.exists(manifest_path) then
       local read = safe_io.readJson(manifest_path, nil)
       if read.ok then
-        service.registerApp(read.data, dir)
+        local registered = service.registerApp(read.data, dir)
+        if not registered.ok and service.ctx.logger then
+          service.ctx.logger.warn("app rejected: " .. manifest_path .. ": " .. tostring(registered.error), service.ctx.logger.file("apps.log"))
+        end
       elseif service.ctx.logger then
         service.ctx.logger.warn("invalid app manifest: " .. manifest_path .. ": " .. tostring(read.error), service.ctx.logger.file("apps.log"))
       end
@@ -46,6 +49,10 @@ function M.new(ctx)
   function service.registerApp(manifest, source_dir)
     local valid = validate(manifest)
     if not valid.ok then return valid end
+    if ctx.permission_service then
+      local permissions = ctx.permission_service.registerApp(manifest)
+      if not permissions.ok then return permissions end
+    end
     return service.registry.register(manifest, source_dir)
   end
 
@@ -78,6 +85,9 @@ function M.new(ctx)
   end
 
   function service.launch(id, args)
+    if ctx.app_runtime_service then
+      return ctx.app_runtime_service.launch(id, args or {})
+    end
     local app = service.getApp(id)
     if not app.ok then return app end
     local entry_path = fs.combine(app.data.source_dir, app.data.manifest.entry)
