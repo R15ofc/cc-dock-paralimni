@@ -81,6 +81,34 @@ local function rounded_fill(gpu, x, y, width, height, color)
   rect(gpu, x + 3, y + 3, width - 6, height - 6, color)
 end
 
+local function small_round(gpu, x, y, width, height, color)
+  rect(gpu, x + 2, y, width - 4, height, color)
+  rect(gpu, x, y + 2, width, height - 4, color)
+  rect(gpu, x + 1, y + 1, width - 2, height - 2, color)
+end
+
+local function glyph_close(gpu, x, y, color)
+  rect(gpu, x + 2, y + 2, 1, 1, color); rect(gpu, x + 3, y + 3, 1, 1, color)
+  rect(gpu, x + 4, y + 4, 1, 1, color); rect(gpu, x + 5, y + 5, 1, 1, color)
+  rect(gpu, x + 5, y + 2, 1, 1, color); rect(gpu, x + 4, y + 3, 1, 1, color)
+  rect(gpu, x + 3, y + 4, 1, 1, color); rect(gpu, x + 2, y + 5, 1, 1, color)
+end
+
+local function glyph_minus(gpu, x, y, color)
+  rect(gpu, x + 2, y + 4, 5, 1, color)
+end
+
+local function glyph_full(gpu, x, y, color)
+  outline(gpu, x + 2, y + 2, 5, 5, color)
+end
+
+local function draw_control_button(gpu, x, y, color, kind)
+  small_round(gpu, x, y, 8, 8, color)
+  if kind == "close" then glyph_close(gpu, x, y, COLORS.white)
+  elseif kind == "min" then glyph_minus(gpu, x, y, COLORS.white)
+  elseif kind == "full" then glyph_full(gpu, x, y, COLORS.white) end
+end
+
 local function write_buffer_chunk(buffer, chunk)
   if type(chunk) == "number" then chunk = string.char(chunk) end
   if type(chunk) ~= "string" then return false, "invalid chunk" end
@@ -164,6 +192,8 @@ function M.new(ctx)
 
   function service.printHelp()
     safe_print("dock about | version | services | ps | devices | apps")
+    safe_print("dock time | timezone <offset> | windows")
+    safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
     safe_print("dock trash <path> | restore <trash_id> | search <query>")
@@ -190,6 +220,21 @@ function M.new(ctx)
       service.printHelp()
     elseif command == "services" then
       for _, item in ipairs(ctx.service_manager.list().data) do safe_print(item.id .. " " .. item.status) end
+    elseif command == "time" then
+      safe_print(ctx.time_service.clockText() .. " " .. ctx.time_service.timezoneText())
+    elseif command == "timezone" then
+      if args[2] then ctx.time_service.setTimezone(args[2]) end
+      safe_print(ctx.time_service.timezoneText())
+    elseif command == "windows" then
+      for _, window in ipairs(ctx.window_service.list().data) do
+        safe_print(window.id .. " " .. window.app_id .. " " .. (window.minimized and "minimized" or "visible"))
+      end
+    elseif command == "ipc" and args[2] == "send" then
+      return print_result(ctx.ipc_service.send("shell", tonumber(args[3]), args[4] or "message", { text = join_words(args, 5) }))
+    elseif command == "ipc" and args[2] == "inbox" then
+      local result = ctx.ipc_service.peek(tonumber(args[3]))
+      for _, item in ipairs(result.data or {}) do safe_print(tostring(item.id) .. " " .. tostring(item.kind)) end
+      return result
     elseif command == "ps" then
       for _, item in ipairs(ctx.process_manager.list().data) do safe_print(tostring(item.pid) .. " " .. item.status .. " " .. item.name) end
     elseif command == "devices" then
@@ -262,6 +307,7 @@ function M.new(ctx)
       for _, app in ipairs(apps) do table.insert(pinned, app.manifest.id) end
       ctx.settings_service.set("user.dock.pinned", pinned)
     end
+    ctx.window_service.restore(width, height)
     return {
       gpu = gpu,
       width = width,
@@ -269,8 +315,8 @@ function M.new(ctx)
       hits = {},
       image_cache = {},
       pinned = pinned,
-      windows = {},
-      active = nil,
+      windows = ctx.window_service.list().data,
+      active = ctx.window_service.activeId().data,
       menu = false,
       context = nil,
       about = false,
@@ -307,6 +353,11 @@ function M.new(ctx)
     table.insert(ui.hits, { id = id, x = x, y = y, w = w, h = h, payload = payload })
   end
 
+  local function sync_windows(ui)
+    ui.windows = ctx.window_service.list().data
+    ui.active = ctx.window_service.activeId().data
+  end
+
   local function draw_wallpaper(ui)
     local exact_path = paths.join(paths.assets, "wallpaper-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png")
     local image = image_from_file(ui.gpu, exact_path, ui.image_cache)
@@ -337,28 +388,13 @@ function M.new(ctx)
       draw_text(ui.gpu, x, 3, label, COLORS.white, -1)
       x = x + (#label * 6) + 10
     end
+    local clock = ctx.time_service and ctx.time_service.clockText() or ""
+    draw_text(ui.gpu, ui.width - (#clock * 6) - 5, 3, clock, COLORS.white, -1)
   end
 
   local function open_window(ui, app_id)
-    local app = ctx.app_service.getApp(app_id)
-    if not app.ok then return end
-    for _, window in ipairs(ui.windows) do
-      if window.app_id == app_id then
-        window.minimized = false
-        local id = window.id
-        local focused
-        local next_windows = {}
-        for _, item in ipairs(ui.windows) do
-          if item.id == id then focused = item else table.insert(next_windows, item) end
-        end
-        if focused then table.insert(next_windows, focused); ui.windows = next_windows; ui.active = id end
-        return
-      end
-    end
-    local id = tostring(os.clock()) .. app_id
-    table.insert(ui.windows, { id = id, app_id = app_id, app = app.data, x = 42, y = 24, w = math.min(220, ui.width - 70), h = math.min(120, ui.height - 58), minimized = false, fullscreen = false })
-    ui.active = id
-    ctx.event_bus.emit("app_launched", { id = app_id })
+    ctx.window_service.open(app_id, { x = 42, y = 24, w = math.min(220, ui.width - 70), h = math.min(120, ui.height - 58) })
+    sync_windows(ui)
   end
 
   local function active_app_id(ui)
@@ -375,7 +411,20 @@ function M.new(ctx)
   end
 
   local function draw_icon_square(ui, x, y, app, active)
-    rect(ui.gpu, x, y, 16, 16, active and COLORS.blue or COLORS.red)
+    small_round(ui.gpu, x, y, 16, 16, active and COLORS.blue or COLORS.red)
+    local icon = app.manifest.icon
+    if icon == "folder" then
+      rect(ui.gpu, x + 3, y + 6, 10, 6, COLORS.white)
+      rect(ui.gpu, x + 4, y + 4, 5, 2, COLORS.white)
+    elseif icon == "terminal" then
+      draw_text(ui.gpu, x + 3, y + 4, ">", COLORS.white, -1)
+      rect(ui.gpu, x + 9, y + 11, 4, 1, COLORS.white)
+    elseif icon == "settings" then
+      outline(ui.gpu, x + 5, y + 5, 6, 6, COLORS.white)
+      rect(ui.gpu, x + 7, y + 7, 2, 2, COLORS.white)
+    else
+      rect(ui.gpu, x + 5, y + 5, 6, 6, COLORS.white)
+    end
     add_hit(ui, "dock_app", x - 2, y - 2, 20, 20, app.manifest.id)
   end
 
@@ -460,9 +509,9 @@ function M.new(ctx)
     outline(ui.gpu, x, y, w, h, COLORS.white)
     add_hit(ui, "window_body", x, y, w, h, window.id)
     add_hit(ui, "window_drag", x, y, w, 18, window.id)
-    rect(ui.gpu, x + 6, y + 6, 6, 6, COLORS.red)
-    rect(ui.gpu, x + 16, y + 6, 6, 6, COLORS.yellow)
-    rect(ui.gpu, x + 26, y + 6, 6, 6, COLORS.green)
+    draw_control_button(ui.gpu, x + 5, y + 5, COLORS.red, "close")
+    draw_control_button(ui.gpu, x + 16, y + 5, COLORS.yellow, "min")
+    draw_control_button(ui.gpu, x + 27, y + 5, COLORS.green, "full")
     add_hit(ui, "window_close", x + 4, y + 4, 10, 10, window.id)
     add_hit(ui, "window_min", x + 14, y + 4, 10, 10, window.id)
     add_hit(ui, "window_full", x + 24, y + 4, 10, 10, window.id)
@@ -507,24 +556,14 @@ function M.new(ctx)
   end
 
   local function focus_window(ui, id)
-    local focused
-    local next_windows = {}
-    for _, window in ipairs(ui.windows) do
-      if window.id == id then focused = window else table.insert(next_windows, window) end
-    end
-    if focused then
-      table.insert(next_windows, focused)
-      ui.windows = next_windows
-      ui.active = id
-    end
-    return focused
+    local focused = ctx.window_service.focus(id)
+    sync_windows(ui)
+    return focused.ok and focused.data or nil
   end
 
   local function close_window(ui, id)
-    local next_windows = {}
-    for _, window in ipairs(ui.windows) do if window.id ~= id then table.insert(next_windows, window) end end
-    ui.windows = next_windows
-    if ui.active == id then ui.active = nil end
+    ctx.window_service.close(id)
+    sync_windows(ui)
   end
 
   local function handle_action(ui, hit, button, x, y)
@@ -547,8 +586,8 @@ function M.new(ctx)
       end
     elseif hit.id == "dock_keep" then pin_app(ui, hit.payload); ui.context = nil
     elseif hit.id == "window_close" then close_window(ui, hit.payload)
-    elseif hit.id == "window_min" then for _, win in ipairs(ui.windows) do if win.id == hit.payload then win.minimized = true end end
-    elseif hit.id == "window_full" then for _, win in ipairs(ui.windows) do if win.id == hit.payload then win.fullscreen = not win.fullscreen end end
+    elseif hit.id == "window_min" then ctx.window_service.minimize(hit.payload, true); sync_windows(ui)
+    elseif hit.id == "window_full" then ctx.window_service.toggleFullscreen(hit.payload); sync_windows(ui)
     elseif hit.id == "window_body" then focus_window(ui, hit.payload)
     elseif hit.id == "window_drag" then
       local window = focus_window(ui, hit.payload)
@@ -563,6 +602,7 @@ function M.new(ctx)
     while true do
       render(ui)
       local event, a, b, c, d = os.pullEvent()
+      if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
       if event == "rednet_message" then ctx.net_service.handleMessage(a, b, c)
       elseif event == "key" and a == keys.q then return { ok = true }
       else
@@ -592,6 +632,7 @@ function M.new(ctx)
             end
           end
           ui.dragging_dock = nil
+          if ui.dragging_window then ctx.window_service.save() end
           ui.dragging_window = nil
           ui.selecting = nil
         elseif mapped == "peripheral" or mapped == "peripheral_detach" then
