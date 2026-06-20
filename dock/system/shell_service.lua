@@ -7,6 +7,7 @@ local scrollbar = require("dock.system.scrollbar")
 local M = {}
 local unpacker = table.unpack or unpack
 local CELL_W, CELL_H = 6, 9
+local WINDOW_TITLEBAR_H = 18
 
 local function join_words(args, start_index)
   local parts = {}
@@ -335,7 +336,7 @@ function M.new(ctx)
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
     safe_print("dock explorer [go|back|up|search|select|rename|new-folder|new-file|copy|cut|paste|trash]")
     safe_print("dock update [check|status|install]")
-    safe_print("dock studio [new|save|export|icon <name>|example <notify|counter>|add <text|button|input|shape|image>]")
+    safe_print("dock studio [new|list|open <id>|save|export|icon <name>|example <notify|counter|clicker>|add <text|button|input|shape|image>]")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
     safe_print("dock trash <path> | restore <trash_id> | search <query>")
@@ -548,6 +549,8 @@ function M.new(ctx)
       modifiers = { ctrl = false, shift = false },
       cursor = { x = math.floor(width / 2), y = math.floor(height / 2), kind = "default" },
       settings = { route = "general", history = {}, future = {} },
+      locked = ctx.user_service and ctx.user_service.loginRequired().data == true,
+      login = { password = "", message = "", active = true },
       frame = 0,
     }
   end
@@ -630,6 +633,16 @@ function M.new(ctx)
     return geometry
   end
 
+  local function app_window_size(app)
+    if not app or not app.source_dir or not ctx.safe_io then return nil end
+    local read = ctx.safe_io.readJson(fs.combine(app.source_dir, "ui.json"), nil)
+    local window = read.ok and read.data and read.data.window
+    if type(window) ~= "table" then return nil end
+    local width = math.max(80, math.min(640, math.floor(tonumber(window.w) or 220)))
+    local height = math.max(60, math.min(360, math.floor(tonumber(window.h) or 120)))
+    return { w = width, h = height }
+  end
+
   local function draw_wallpaper(ui)
     local exact_path = paths.join(paths.assets, "wallpaper-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png")
     local image = image_from_file(ui.gpu, exact_path, ui.image_cache)
@@ -684,8 +697,12 @@ function M.new(ctx)
     elseif app_id == "dock.studio" then
       geometry = { x = 22, y = 18, w = math.min(340, ui.width - 36), h = math.min(142, ui.height - 56) }
     end
-    geometry = fit_geometry(ui, geometry)
     local app = ctx.app_service.getApp(app_id)
+    if app.ok and app.data.manifest.type ~= "system" then
+      local app_size = app_window_size(app.data)
+      if app_size then geometry.w, geometry.h = app_size.w, app_size.h end
+    end
+    geometry = fit_geometry(ui, geometry)
     if app.ok and app.data.manifest.type ~= "system" and ctx.app_runtime_service and ctx.app_runtime_service.stateForApp then
       local runtime = ctx.app_runtime_service.stateForApp(app_id).data
       if not runtime.running then ctx.app_runtime_service.launch(app_id, {}) end
@@ -753,6 +770,7 @@ function M.new(ctx)
       software_update = "Software Update",
       accessibility = "Accessibility",
       appearance = "Appearance",
+      privacy_security = "Privacy & Security",
       about = "About",
       storage = "Storage",
     }
@@ -1140,6 +1158,24 @@ function M.new(ctx)
     add_hit(ui, id, x, y, width, height, payload)
   end
 
+  local function draw_password_setting(ui, window, x, y, width)
+    local field_x = x + math.max(70, math.floor(width * 0.43))
+    local field_w = math.max(42, width - (field_x - x))
+    local active = focused_input(ui, "settings_password", window.id)
+    local field_id = input_id("settings_password", window.id)
+    local view = active and input_view(field_id, "") or { value = "", cursor = 0 }
+    local text = active and string.rep("*", #tostring(view.value or "")) or "New password"
+    draw_text(ui.gpu, x, y + 3, "Password", rgb(84, 88, 94), -1)
+    rect(ui.gpu, field_x, y, field_w, 14, rgb(246, 248, 251))
+    outline(ui.gpu, field_x, y, field_w, 14, active and COLORS.blue or rgb(190, 196, 205))
+    draw_text(ui.gpu, field_x + 5, y + 4, ellipsize(text, math.floor((field_w - 10) / CELL_W)), active and COLORS.black or rgb(116, 121, 128), -1)
+    if active then
+      local cursor_x = field_x + 5 + math.min(#tostring(view.value or ""), math.floor((field_w - 10) / CELL_W)) * CELL_W
+      rect(ui.gpu, cursor_x, y + 2, 1, 10, COLORS.black)
+    end
+    add_hit(ui, "settings_password_field", field_x, y, field_w, 14, { window_id = window.id, text_x = field_x + 5 })
+  end
+
   local function draw_settings(ui, window, x, y, w, h)
     local content_x, content_y = x + 6, y + 21
     local content_w, content_h = w - 12, h - 28
@@ -1162,6 +1198,7 @@ function M.new(ctx)
       { id = "general", label = "General" },
       { id = "accessibility", label = "Accessibility" },
       { id = "appearance", label = "Appearance" },
+      { id = "privacy_security", label = "Privacy & Security" },
       { id = "about", label = "About" },
       { id = "storage", label = "Storage" },
     }
@@ -1200,6 +1237,24 @@ function M.new(ctx)
         if tile_y + 16 <= content_y + content_h - 5 then
           draw_settings_button(ui, "settings_theme", tile_x, tile_y, tile_w, 16, theme, theme:lower(), colors_by_theme[theme] or rgb(226, 231, 238), theme == "Dark" and COLORS.white or COLORS.black)
         end
+      end
+      return
+    elseif route == "privacy_security" then
+      local profile = ctx.user_service.profile().data
+      local has_password = ctx.user_service.hasPassword().data == true
+      local login_required = ctx.user_service.loginRequired().data == true
+      local card_h = math.min(76, math.max(64, content_y + content_h - body_y - 6))
+      draw_settings_card(ui, body_x, body_y, body_w, card_h)
+      draw_text(ui.gpu, body_x + 10, body_y + 7, "Account Security", COLORS.black, -1)
+      draw_settings_row(ui, "Account", tostring(profile.name or "Default User"), body_x + 10, body_y + 20, body_w - 20)
+      draw_settings_row(ui, "Login", login_required and "Password" or "Automatic", body_x + 10, body_y + 31, body_w - 20)
+      local toggle_label = login_required and "Disable Login" or "Require Login"
+      local toggle_w = math.min(88, math.max(72, body_w - 20))
+      draw_settings_button(ui, "settings_login_toggle", body_x + body_w - toggle_w - 10, body_y + 43, toggle_w, 14, toggle_label, nil, has_password and COLORS.blue or rgb(198, 203, 212), COLORS.white)
+      if card_h >= 70 then draw_password_setting(ui, window, body_x + 10, body_y + 59, body_w - 20) end
+      local clear_y = body_y + card_h + 6
+      if has_password and clear_y + 14 <= content_y + content_h then
+        draw_settings_button(ui, "settings_password_clear", body_x, clear_y, math.min(92, body_w), 14, "Clear Password", nil, COLORS.red, COLORS.white)
       end
       return
     end
@@ -1341,13 +1396,12 @@ function M.new(ctx)
   local function draw_generated_app(ui, window, x, y, w, h)
     local view = read_app_ui(window.app)
     if not view then return false end
-    local content_x, content_y = x + 8, y + 24
-    local content_w, content_h = w - 16, h - 32
+    local content_x, content_y = x + 1, y + WINDOW_TITLEBAR_H
+    local content_w, content_h = w - 2, h - WINDOW_TITLEBAR_H - 1
     rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(246, 247, 250))
-    draw_text(ui.gpu, content_x + 8, content_y + 8, ellipsize(view.name or window.app.manifest.name, math.floor((content_w - 16) / 6)), COLORS.black, -1)
-    local offset_y = content_y + 24
-    local clip_x, clip_y = content_x + 2, offset_y
-    local clip_w, clip_h = math.max(1, content_w - 4), math.max(1, content_h - 26)
+    local offset_y = content_y
+    local clip_x, clip_y = content_x, offset_y
+    local clip_w, clip_h = math.max(1, content_w), math.max(1, content_h)
     for index, component in ipairs(view.components or {}) do
       component = display_component(window.app_id, component)
       local cx = content_x + math.max(1, component.x or 1)
@@ -1607,13 +1661,14 @@ function M.new(ctx)
     project.preview_scroll_y = math.min(max_scroll_y, tonumber(project.preview_scroll_y) or 0)
     local app_x = viewport_x + 4 - project.preview_scroll_x
     local app_y = viewport_y + 4 - project.preview_scroll_y
+    local titlebar_h = WINDOW_TITLEBAR_H
     local function clipped_rect(rx, ry, rw, rh, color)
       local x1, y1 = math.max(viewport_x + 1, rx), math.max(viewport_y + 1, ry)
       local x2, y2 = math.min(viewport_x + viewport_w - 2, rx + rw - 1), math.min(viewport_y + viewport_h - 2, ry + rh - 1)
       if x2 >= x1 and y2 >= y1 then rect(ui.gpu, x1, y1, x2 - x1 + 1, y2 - y1 + 1, color) end
     end
     clipped_rect(app_x, app_y, app_w, app_h, rgb(246, 247, 250))
-    clipped_rect(app_x, app_y, app_w, 18, rgb(28, 31, 36))
+    clipped_rect(app_x, app_y, app_w, titlebar_h, rgb(28, 31, 36))
     if app_y >= viewport_y - 4 and app_y <= viewport_y + viewport_h then
       if app_x + 5 >= viewport_x and app_x + 33 <= viewport_x + viewport_w then
         draw_control_button(ui.gpu, app_x + 5, app_y + 5, COLORS.red, "close")
@@ -1624,10 +1679,10 @@ function M.new(ctx)
         draw_text(ui.gpu, math.max(viewport_x + 2, app_x + 42), app_y + 6, ellipsize(project.name, math.floor((viewport_x + viewport_w - math.max(viewport_x + 2, app_x + 42)) / 6)), COLORS.white, -1)
       end
     end
-    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, titlebar_h = 22, mode = mode, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
+    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, titlebar_h = titlebar_h, mode = mode, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
     for index, component in ipairs(project.components or {}) do
       local cx = app_x + (component.x or 1)
-      local cy = app_y + 22 + (component.y or 1)
+      local cy = app_y + titlebar_h + (component.y or 1)
       local cw = component.w or 60
       local ch = component.h or 16
       local inside = cx + cw >= viewport_x + 1 and cx <= viewport_x + viewport_w - 2 and cy + ch >= viewport_y + 1 and cy <= viewport_y + viewport_h - 2
@@ -1638,7 +1693,7 @@ function M.new(ctx)
         local draw_h = math.max(1, math.min(cy + ch, viewport_y + viewport_h - 2) - draw_y + 1)
         draw_studio_component(ui, component, draw_x, draw_y, draw_w, draw_h, index == project.selected, false)
         if design_mode and (project.tool or "move") == "move" then
-          add_hit(ui, "studio_component", draw_x, draw_y, draw_w, draw_h, { index = index, app_x = app_x, app_y = app_y, titlebar_h = 22 })
+          add_hit(ui, "studio_component", draw_x, draw_y, draw_w, draw_h, { index = index, app_x = app_x, app_y = app_y, titlebar_h = titlebar_h })
         end
       end
     end
@@ -1662,13 +1717,15 @@ function M.new(ctx)
     rect(ui.gpu, x, y, w, h, rgb(20, 24, 28))
     outline(ui.gpu, x, y, w, h, COLORS.white)
     add_hit(ui, "window_body", x, y, w, h, window.id)
-    add_hit(ui, "window_drag", x, y, w, 18, window.id)
+    add_hit(ui, "window_drag", x, y, w, WINDOW_TITLEBAR_H, window.id)
     draw_control_button(ui.gpu, x + 5, y + 5, COLORS.red, "close")
     draw_control_button(ui.gpu, x + 16, y + 5, COLORS.yellow, "min")
     draw_control_button(ui.gpu, x + 27, y + 5, COLORS.green, "full")
     add_hit(ui, "window_close", x + 4, y + 4, 10, 10, window.id)
     add_hit(ui, "window_min", x + 14, y + 4, 10, 10, window.id)
     add_hit(ui, "window_full", x + 24, y + 4, 10, 10, window.id)
+    local title = window.app and window.app.manifest and window.app.manifest.name or window.app_id or "Window"
+    draw_text(ui.gpu, x + 42, y + 6, ellipsize(title, math.floor((w - 48) / CELL_W)), COLORS.white, -1)
     local app_id = window.app_id
     local content_x, content_y = x + 10, y + 22
     push_ui_clip(ui, x + 1, y + 18, w - 2, h - 19)
@@ -1689,9 +1746,12 @@ function M.new(ctx)
     pop_ui_clip(ui)
   end
 
+  local draw_login
+
   local function render(ui)
     ui.frame = (ui.frame or 0) + 1
     ui.hits = {}
+    if ui.locked then draw_login(ui); return end
     local update_status = ctx.update_service and ctx.update_service.status().data.status or "idle"
     if ctx.cursor_service then ctx.cursor_service.setBusy("dock.settings", update_status == "checking" or update_status == "installing") end
     ui.studio_panel_metrics = nil
@@ -1741,12 +1801,59 @@ function M.new(ctx)
     end
   end
 
+  local function draw_center_text(ui, y, text, color)
+    text = tostring(text or "")
+    draw_text(ui.gpu, math.floor((ui.width - (#text * CELL_W)) / 2), y, text, color or COLORS.white, -1)
+  end
+
+  function draw_login(ui)
+    ui.hits = {}
+    draw_wallpaper(ui)
+    rect(ui.gpu, 1, 1, ui.width, ui.height, rgb(0, 0, 0))
+    local profile = ctx.user_service.profile().data
+    local name = tostring(profile.name or "Default User")
+    local cx = math.floor(ui.width / 2)
+    local avatar = math.max(28, math.min(42, math.floor(ui.height * 0.22)))
+    local avatar_x = cx - math.floor(avatar / 2)
+    local avatar_y = math.max(22, math.floor(ui.height * 0.23))
+    rounded_fill(ui.gpu, avatar_x, avatar_y, avatar, avatar, rgb(232, 236, 244))
+    rounded_outline(ui.gpu, avatar_x, avatar_y, avatar, avatar, rgb(255, 255, 255))
+    local initials = name:match("(%w)") or "U"
+    draw_text(ui.gpu, cx - 3, avatar_y + math.floor(avatar / 2) - 4, initials:upper(), rgb(34, 39, 48), -1)
+    draw_center_text(ui, avatar_y + avatar + 10, name, COLORS.white)
+    local field_w = math.min(142, math.max(94, math.floor(ui.width * 0.36)))
+    local field_h = 16
+    local field_x = cx - math.floor(field_w / 2)
+    local field_y = avatar_y + avatar + 25
+    local password = tostring(ui.login and ui.login.password or "")
+    small_round(ui.gpu, field_x, field_y, field_w, field_h, rgb(246, 248, 252))
+    outline(ui.gpu, field_x, field_y, field_w, field_h, ui.login and ui.login.active and COLORS.blue or rgb(210, 216, 226))
+    local shown = #password > 0 and string.rep("*", #password) or "Password"
+    draw_text(ui.gpu, field_x + 7, field_y + 5, ellipsize(shown, math.floor((field_w - 14) / CELL_W)), #password > 0 and COLORS.black or rgb(118, 124, 136), -1)
+    if ui.login and ui.login.active then
+      local cursor_x = field_x + 7 + math.min(#password, math.floor((field_w - 14) / CELL_W)) * CELL_W
+      rect(ui.gpu, cursor_x, field_y + 3, 1, field_h - 6, COLORS.black)
+    end
+    add_hit(ui, "login_password", field_x, field_y, field_w, field_h)
+    if ui.login and ui.login.message and ui.login.message ~= "" then draw_center_text(ui, field_y + 23, ui.login.message, COLORS.red) end
+    if ctx.cursor_service then
+      local hover = hit_at(ui, ui.cursor.x, ui.cursor.y)
+      local kind = ctx.cursor_service.infer(hover, false)
+      ctx.cursor_service.draw(ui.gpu, kind, ui.frame)
+    end
+    if ui.gpu.sync then pcall(ui.gpu.sync) end
+  end
+
   local function finish_text_input(ui, commit)
     if not ui.text_input then return end
     sync_text_input(ui)
     local input = ui.text_input
     if input.kind == "explorer_rename" then
       if commit then ctx.explorer_service.commitRename(input.window_id) else ctx.explorer_service.cancelRename(input.window_id) end
+    elseif input.kind == "settings_password" then
+      local view = ctx.text_input_service.view(input.input_id).data
+      local value = tostring(view and view.value or "")
+      if commit and value ~= "" then ctx.user_service.setPassword(value) end
     end
     ui.text_input = nil
   end
@@ -1765,6 +1872,8 @@ function M.new(ctx)
     elseif ui.text_input and ui.text_input.kind == "studio_code" and hit.id ~= "studio_code_line" then
       finish_text_input(ui, true)
     elseif ui.text_input and ui.text_input.kind == "studio_prop" and hit.id ~= "studio_prop_field" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "settings_password" and hit.id ~= "settings_password_field" then
       finish_text_input(ui, true)
     end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
@@ -1837,6 +1946,15 @@ function M.new(ctx)
       settings.scroll[hit.payload.route] = scrollbar.offsetFromY(hit.payload.metrics, y)
     elseif hit.id == "settings_theme" then ctx.settings_service.set("user.theme", hit.payload)
     elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
+    elseif hit.id == "settings_login_toggle" then
+      local required = ctx.user_service.loginRequired().data == true
+      ctx.user_service.setLoginRequired(not required)
+    elseif hit.id == "settings_password_clear" then
+      ctx.user_service.setPassword("")
+    elseif hit.id == "settings_password_field" then
+      local id = focus_text_input(ui, "settings_password", hit.payload.window_id, "", 0)
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, CELL_W, false)
+      sync_text_input(ui)
     elseif hit.id == "studio_new" then ctx.studio_service.newProject()
     elseif hit.id == "studio_save" then ctx.studio_service.save()
     elseif hit.id == "studio_export" then ctx.studio_service.exportApp(); ctx.app_service.scanApps()
@@ -2095,6 +2213,62 @@ function M.new(ctx)
     return false
   end
 
+  local function attempt_login(ui)
+    local verified = ctx.user_service.verifyPassword(ui.login and ui.login.password or "")
+    if verified.ok and verified.data and verified.data.authenticated then
+      ui.locked = false
+      ui.login.password = ""
+      ui.login.message = ""
+      return true
+    end
+    ui.login.password = ""
+    ui.login.message = "Incorrect password"
+    return false
+  end
+
+  local function handle_login_event(ui, event, a, b, c, d)
+    ui.login = ui.login or { password = "", message = "", active = true }
+    if event == "char" then
+      ui.login.password = tostring(ui.login.password or "") .. tostring(a or "")
+      ui.login.message = ""
+      return true
+    elseif event == "paste" then
+      ui.login.password = tostring(ui.login.password or "") .. tostring(a or "")
+      ui.login.message = ""
+      return true
+    elseif event == "tm_keyboard_char" then
+      ui.login.password = tostring(ui.login.password or "") .. tostring(b or a or "")
+      ui.login.message = ""
+      return true
+    elseif event == "tm_keyboard_paste" then
+      ui.login.password = tostring(ui.login.password or "") .. tostring(b or a or "")
+      ui.login.message = ""
+      return true
+    elseif event == "key" or event == "tm_keyboard_key" then
+      local key = event == "tm_keyboard_key" and (b or a) or a
+      if keys and key == keys.backspace then
+        ui.login.password = tostring(ui.login.password or ""):sub(1, -2)
+        return true
+      elseif keys and (key == keys.enter or key == keys.numPadEnter) then
+        attempt_login(ui)
+        return true
+      end
+    else
+      local mapped, button, x, y = pixel_event(event, a, b, c, d)
+      if (mapped == "mouse_click" or mapped == "mouse_move") and ctx.cursor_service then
+        ctx.cursor_service.setPosition(x, y)
+        ui.cursor.x, ui.cursor.y = x, y
+      end
+      if mapped == "mouse_click" then
+        local hit = hit_at(ui, x, y)
+        ui.login.active = hit and hit.id == "login_password"
+        if hit and hit.id == "login_password" and button == 1 then ui.login.message = "" end
+        return true
+      end
+    end
+    return false
+  end
+
   local function run_graphical(gpu, width, height)
     local ui = initial_ui_state(gpu, width, height)
     while true do
@@ -2102,7 +2276,9 @@ function M.new(ctx)
       if needs_animation(ui) and os.startTimer then os.startTimer(animation.timerInterval(true)) end
       local event, a, b, c, d = os.pullEvent()
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
-      if handle_modifier_key(ui, event, a, b) then
+      if ui.locked then
+        handle_login_event(ui, event, a, b, c, d)
+      elseif handle_modifier_key(ui, event, a, b) then
       elseif handle_text_input(ui, event, a, b) then
       elseif not ui.text_input and (event == "key" or event == "tm_keyboard_key") and handle_global_key(ui, event, a, b) then
       elseif event == "rednet_message" then ctx.net_service.handleMessage(a, b, c)

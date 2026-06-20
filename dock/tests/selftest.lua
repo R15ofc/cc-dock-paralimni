@@ -15,6 +15,9 @@ return {
 
     check("boot directories", fs.exists(paths.root) and fs.exists(paths.etc) and fs.exists(paths.logs))
     check("user folders", fs.exists(paths.userFolder("default", "Documents")) and fs.exists(paths.userFolder("default", "Trash")))
+    local user_profile = ctx.user_service.profile()
+    local login_required = ctx.user_service.loginRequired()
+    check("user auth service", user_profile.ok and user_profile.data.id == "default" and login_required.ok)
     ctx.settings_service.set("user.selftest", "ok")
     check("settings save/load", ctx.settings_service.get("user.selftest").data == "ok")
     local doc_path = paths.join(paths.userFolder("default", "Documents"), "selftest.txt")
