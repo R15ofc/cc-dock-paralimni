@@ -332,8 +332,47 @@ end
 
 local function format_size(size)
   size = tonumber(size) or 0
+  if size >= 1024 * 1024 then return tostring(math.floor((size / (1024 * 1024)) * 10) / 10) .. "M" end
   if size >= 1024 then return tostring(math.floor(size / 1024)) .. "K" end
   return tostring(size) .. "B"
+end
+
+local function folder_size(path, budget)
+  budget = budget or { count = 0, max = 900 }
+  if not path or not fs.exists(path) then return 0 end
+  if not fs.isDir(path) then return fs.getSize(path) or 0 end
+  local total = 0
+  for _, name in ipairs(fs.list(path)) do
+    budget.count = budget.count + 1
+    if budget.count > budget.max then return total, true end
+    local child_total, truncated = folder_size(fs.combine(path, name), budget)
+    total = total + (child_total or 0)
+    if truncated then return total, true end
+  end
+  return total, false
+end
+
+local function storage_info()
+  local used, truncated = folder_size("dock")
+  local free, capacity
+  if fs.getFreeSpace then
+    local ok, value = pcall(fs.getFreeSpace, "/")
+    if ok then free = value end
+  end
+  if fs.getCapacity then
+    local ok, value = pcall(fs.getCapacity, "/")
+    if ok then capacity = value end
+  end
+  local used_label = format_size(used) .. (truncated and "+" or "")
+  local free_label = type(free) == "number" and format_size(free) or tostring(free or "unlimited")
+  local capacity_label = type(capacity) == "number" and format_size(capacity) or tostring(capacity or "unlimited")
+  return { used = used_label, free = free_label, capacity = capacity_label }
+end
+
+local function memory_label()
+  local kb = collectgarbage and collectgarbage("count") or nil
+  if type(kb) ~= "number" then return "unavailable" end
+  return format_size(math.floor(kb * 1024))
 end
 
 local function draw_file_icon(gpu, x, y, is_folder, selected)
@@ -1221,12 +1260,10 @@ function M.new(ctx)
       { id = "accessibility", label = "Accessibility" },
       { id = "appearance", label = "Appearance" },
       { id = "privacy_security", label = "Privacy & Security" },
-      { id = "about", label = "About" },
-      { id = "storage", label = "Storage" },
     }
     local tab_y = content_y + 10
     for _, tab in ipairs(sections) do
-      local selected = route == tab.id or (tab.id == "general" and route == "software_update")
+      local selected = route == tab.id or (tab.id == "general" and (route == "software_update" or route == "about" or route == "storage"))
       if selected then small_round(ui.gpu, rail_x + 6, tab_y - 4, rail_w - 12, 14, rgb(70, 78, 92)) end
       draw_text(ui.gpu, rail_x + 14, tab_y, ellipsize(tab.label, math.floor((rail_w - 20) / 6)), COLORS.white, -1)
       add_hit(ui, "settings_nav", rail_x + 5, tab_y - 5, rail_w - 10, 16, tab.id)
@@ -1237,7 +1274,9 @@ function M.new(ctx)
     local body_w = main_w - 20
     if route == "general" then
       draw_text(ui.gpu, body_x, body_y, "Categories", rgb(84, 88, 94), -1)
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 15, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 15, body_w, 17, "About This Computer", "about", rgb(250, 250, 252))
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 36, body_w, 17, "Storage", "storage", rgb(250, 250, 252))
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 57, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
       return
     elseif route == "appearance" then
       local themes = { "Blue", "Red", "Green", "White", "Dark" }
@@ -1312,26 +1351,59 @@ function M.new(ctx)
         draw_text(ui.gpu, card_x + 12, card_y + 14, "No updates", rgb(116, 121, 128), -1)
       end
     elseif route == "about" then
-      local card_h = 49
-      draw_settings_card(ui, body_x, body_y, body_w, card_h)
-      draw_text(ui.gpu, body_x + 10, body_y + 6, "Computer Info", COLORS.black, -1)
-      draw_settings_row(ui, "Edition", tostring(ctx.version.edition or "Basic"), body_x + 10, body_y + 18, body_w - 20)
-      draw_settings_row(ui, "Memory", "-", body_x + 10, body_y + 29, body_w - 20)
-      draw_settings_row(ui, "Storage", "-", body_x + 10, body_y + 40, body_w - 20, false)
-      local dock_card_y = body_y + card_h + 6
-      if dock_card_y + 27 <= content_y + content_h then
-        draw_settings_card(ui, body_x, dock_card_y, body_w, 27)
-        draw_text(ui.gpu, body_x + 10, dock_card_y + 5, "DockOS", COLORS.black, -1)
-        draw_text(ui.gpu, body_x + 10, dock_card_y + 17, "DockOS " .. ctx.version.codename .. " " .. ctx.version.version, rgb(84, 88, 94), -1)
+      local storage = storage_info()
+      local rows = {
+        { label = "DockOS", value = tostring(ctx.version.codename) .. " " .. tostring(ctx.version.version) },
+        { label = "Edition", value = tostring(ctx.version.edition or "Basic") },
+        { label = "Channel", value = tostring(ctx.version.channel or "dev") },
+        { label = "Computer", value = terminal_type() },
+        { label = "Monitor", value = block_size(ui.width, ui.height) .. " (" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ")" },
+        { label = "Memory", value = memory_label() },
+        { label = "Storage Used", value = storage.used },
+        { label = "Storage Free", value = storage.free },
+        { label = "Applications", value = tostring(#(ctx.app_service.listApps().data or {})) },
+        { label = "Processes", value = tostring(#(ctx.process_manager.list().data or {})) },
+        { label = "Windows", value = tostring(#(ui.windows or {})) },
+      }
+      local row_h = 16
+      local visible = math.max(1, math.floor((content_y + content_h - body_y - 6) / row_h))
+      local max_scroll = math.max(0, #rows - visible)
+      local scroll = math.min(math.max(0, tonumber(settings.scroll.about) or 0), max_scroll)
+      settings.scroll.about = scroll
+      for index = 1, math.min(visible, #rows) do
+        local item = rows[index + scroll]
+        local row_y = body_y + ((index - 1) * row_h)
+        draw_settings_card(ui, body_x, row_y, body_w - 8, 13)
+        draw_text(ui.gpu, body_x + 8, row_y + 4, ellipsize(item.label, math.floor((body_w - 74) / CELL_W)), rgb(84, 88, 94), -1)
+        draw_text(ui.gpu, body_x + math.max(62, math.floor(body_w * 0.45)), row_y + 4, ellipsize(item.value, math.floor((body_w * 0.52) / CELL_W)), COLORS.black, -1)
       end
+      local metrics = scrollbar.metrics(#rows, visible, scroll, body_x + body_w - 5, body_y, math.max(14, visible * row_h - 3))
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(220, 224, 230), thumb = rgb(110, 118, 128) })
+      if metrics.enabled then add_hit(ui, "settings_scrollbar", metrics.x - 3, metrics.y, 10, metrics.h, { route = "about", metrics = metrics }) end
     elseif route == "storage" then
-      local free = fs.getFreeSpace and fs.getFreeSpace("/") or nil
-      local used_label = "-"
-      local free_label = type(free) == "number" and format_size(free) or tostring(free or "-")
-      draw_settings_card(ui, body_x, body_y, body_w, 48)
-      draw_text(ui.gpu, body_x + 10, body_y + 8, "Storage", COLORS.black, -1)
-      draw_settings_row(ui, "Used", used_label, body_x + 10, body_y + 23, body_w - 20)
-      draw_settings_row(ui, "Available", free_label, body_x + 10, body_y + 36, body_w - 20)
+      local storage = storage_info()
+      local rows = {
+        { label = "DockOS Files", value = storage.used },
+        { label = "Available", value = storage.free },
+        { label = "Capacity", value = storage.capacity },
+        { label = "Root", value = "/" },
+        { label = "User Home", value = paths.userHome("default") },
+      }
+      local row_h = 16
+      local visible = math.max(1, math.floor((content_y + content_h - body_y - 6) / row_h))
+      local max_scroll = math.max(0, #rows - visible)
+      local scroll = math.min(math.max(0, tonumber(settings.scroll.storage) or 0), max_scroll)
+      settings.scroll.storage = scroll
+      for index = 1, math.min(visible, #rows) do
+        local item = rows[index + scroll]
+        local row_y = body_y + ((index - 1) * row_h)
+        draw_settings_card(ui, body_x, row_y, body_w - 8, 13)
+        draw_text(ui.gpu, body_x + 8, row_y + 4, ellipsize(item.label, math.floor((body_w - 78) / CELL_W)), rgb(84, 88, 94), -1)
+        draw_text(ui.gpu, body_x + math.max(68, math.floor(body_w * 0.48)), row_y + 4, ellipsize(item.value, math.floor((body_w * 0.48) / CELL_W)), COLORS.black, -1)
+      end
+      local metrics = scrollbar.metrics(#rows, visible, scroll, body_x + body_w - 5, body_y, math.max(14, visible * row_h - 3))
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(220, 224, 230), thumb = rgb(110, 118, 128) })
+      if metrics.enabled then add_hit(ui, "settings_scrollbar", metrics.x - 3, metrics.y, 10, metrics.h, { route = "storage", metrics = metrics }) end
     elseif route == "accessibility" then
       local options = {
         { label = "Text Size", value = tostring(ctx.settings_service.get("user.accessibility.text_size", "Normal").data) },
