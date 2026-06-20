@@ -1,0 +1,13 @@
+{
+  "id": "dock.settings",
+  "name": "Settings",
+  "version": "0.0.1",
+  "entry": "main.lua",
+  "type": "system",
+  "category": "system",
+  "icon": "settings",
+  "permissions": ["settings.read", "settings.write", "peripheral.access"],
+  "file_associations": [],
+  "autoload": false,
+  "desktop": true
+}

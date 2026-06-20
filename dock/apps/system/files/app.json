@@ -1,0 +1,13 @@
+{
+  "id": "dock.files",
+  "name": "Files",
+  "version": "0.0.1",
+  "entry": "main.lua",
+  "type": "system",
+  "category": "system",
+  "icon": "folder",
+  "permissions": ["fs.read", "fs.write", "fs.delete"],
+  "file_associations": ["folder", "document/text", "code/lua", "data/json"],
+  "autoload": false,
+  "desktop": true
+}
