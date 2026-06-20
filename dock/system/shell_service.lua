@@ -149,14 +149,14 @@ local function pixel_event(event, a, b, c, d)
   if event == "mouse_click" or event == "mouse_drag" or event == "mouse_up" then
     return event, a or 1, ((b or 1) - 1) * CELL_W + 1, ((c or 1) - 1) * CELL_H + 1
   end
-  if event == "tm_monitor_mouse_click" or event == "tm_monitor_mouse_drag" or event == "tm_monitor_mouse_up" or event == "tm_monitor_touch" then
+  if event == "tm_monitor_mouse_click" or event == "tm_monitor_mouse_drag" or event == "tm_monitor_mouse_up" or event == "tm_monitor_touch" or event == "tm_monitor_mouse_move" then
     local px, py, button
     if type(a) == "number" and type(b) == "number" then
       px, py, button = a, b, c or 1
     else
       px, py, button = b or 1, c or 1, d or 1
     end
-    local mapped = event == "tm_monitor_mouse_drag" and "mouse_drag" or (event == "tm_monitor_mouse_up" and "mouse_up" or "mouse_click")
+    local mapped = event == "tm_monitor_mouse_drag" and "mouse_drag" or (event == "tm_monitor_mouse_up" and "mouse_up" or (event == "tm_monitor_mouse_move" and "mouse_move" or "mouse_click"))
     return mapped, button or 1, px, py
   end
   return event, a, b, c
@@ -224,6 +224,7 @@ function M.new(ctx)
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
     safe_print("dock explorer [go|back|up|search|select|rename|new-folder|new-file|copy|cut|paste|trash]")
     safe_print("dock update [check|status|install]")
+    safe_print("dock studio [new|save|export|add <text|button|input|shape|image>]")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
     safe_print("dock trash <path> | restore <trash_id> | search <query>")
@@ -320,6 +321,17 @@ function M.new(ctx)
       safe_print("Update: " .. tostring(result.data.status))
       if result.data.available then safe_print(result.data.available.title) end
       return result
+    elseif command == "studio" then
+      local action = args[2] or "current"
+      local result
+      if action == "new" then result = ctx.studio_service.newProject(join_words(args, 3))
+      elseif action == "save" then result = ctx.studio_service.save()
+      elseif action == "export" then result = ctx.studio_service.exportApp()
+      elseif action == "add" then result = ctx.studio_service.addComponent(args[3] or "text")
+      else result = ctx.studio_service.current() end
+      if not result.ok then return print_result(result) end
+      safe_print("Studio: " .. tostring((ctx.studio_service.current().data or {}).name))
+      return result
     elseif command == "ps" then
       for _, item in ipairs(ctx.process_manager.list().data) do safe_print(tostring(item.pid) .. " " .. item.status .. " " .. item.name) end
     elseif command == "devices" then
@@ -410,6 +422,9 @@ function M.new(ctx)
       dragging_window = nil,
       dock_metrics = nil,
       text_input = nil,
+      dragging_text = nil,
+      modifiers = { ctrl = false, shift = false },
+      cursor = { x = math.floor(width / 2), y = math.floor(height / 2), kind = "default" },
       settings = { route = "general", history = {}, future = {} },
       frame = 0,
     }
@@ -446,6 +461,8 @@ function M.new(ctx)
     ui.active = ctx.window_service.activeId().data
   end
 
+  local active_window, active_app_id
+
   local function draw_wallpaper(ui)
     local exact_path = paths.join(paths.assets, "wallpaper-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png")
     local image = image_from_file(ui.gpu, exact_path, ui.image_cache)
@@ -471,10 +488,16 @@ function M.new(ctx)
     rect(ui.gpu, 1, 1, 6, 6, COLORS.black)
     add_hit(ui, "system_menu", 1, 1, 12, 12)
     local x = 13
-    local menu = { "About", "File", "Edit", "View", "Window" }
-    for _, label in ipairs(menu) do
-      draw_text(ui.gpu, x, 3, label, COLORS.white, -1)
-      x = x + (#label * 6) + 10
+    local app_id = active_app_id(ui)
+    local menu = ctx.menu_service.menuFor(app_id).data or {}
+    table.insert(menu, 1, { id = "about", label = "About" })
+    for _, item in ipairs(menu) do
+      local label = item.label
+      local width = (#label * 6) + 8
+      draw_text(ui.gpu, x, 3, label, item.enabled == false and COLORS.gray or COLORS.white, -1)
+      add_hit(ui, "top_menu", x - 3, 1, width, 12, { app_id = app_id, action = item.id })
+      x = x + width + 2
+      if x > ui.width - 72 then break end
     end
     local clock = ctx.time_service and ctx.time_service.clockText() or ""
     draw_text(ui.gpu, ui.width - (#clock * 6) - 5, 3, clock, COLORS.white, -1)
@@ -486,17 +509,19 @@ function M.new(ctx)
       geometry = { x = 24, y = 20, w = math.min(330, ui.width - 38), h = math.min(138, ui.height - 58) }
     elseif app_id == "dock.settings" then
       geometry = { x = 32, y = 20, w = math.min(290, ui.width - 54), h = math.min(136, ui.height - 58) }
+    elseif app_id == "dock.studio" then
+      geometry = { x = 22, y = 18, w = math.min(340, ui.width - 36), h = math.min(142, ui.height - 56) }
     end
     ctx.window_service.open(app_id, geometry)
     sync_windows(ui)
   end
 
-  local function active_window(ui)
+  function active_window(ui)
     for _, window in ipairs(ui.windows) do if window.id == ui.active and not window.minimized then return window end end
     return nil
   end
 
-  local function active_app_id(ui)
+  function active_app_id(ui)
     local window = active_window(ui)
     return window and window.app_id or nil
   end
@@ -566,6 +591,11 @@ function M.new(ctx)
     elseif icon == "settings" then
       outline(ui.gpu, x + 5, y + 5, 6, 6, COLORS.white)
       rect(ui.gpu, x + 7, y + 7, 2, 2, COLORS.white)
+    elseif icon == "studio" then
+      rect(ui.gpu, x + 4, y + 4, 8, 2, COLORS.white)
+      rect(ui.gpu, x + 4, y + 7, 8, 1, COLORS.white)
+      rect(ui.gpu, x + 4, y + 10, 6, 1, COLORS.white)
+      rect(ui.gpu, x + 12, y + 10, 2, 3, COLORS.white)
     else
       rect(ui.gpu, x + 5, y + 5, 6, 6, COLORS.white)
     end
@@ -645,6 +675,60 @@ function M.new(ctx)
     outline(ui.gpu, x, y, w, h, COLORS.white)
   end
 
+  local function input_id(kind, window_id)
+    return tostring(kind) .. ":" .. tostring(window_id or "main")
+  end
+
+  local function focused_input(ui, kind, window_id)
+    return ui.text_input and ui.text_input.kind == kind and ui.text_input.window_id == window_id
+  end
+
+  local function input_view(id, fallback)
+    local current = ctx.text_input_service.view(id).data
+    if not current or current.value == nil then return { value = fallback or "", cursor = #(fallback or "") } end
+    return current
+  end
+
+  local function sync_text_input(ui)
+    if not ui.text_input then return end
+    local view = ctx.text_input_service.view(ui.text_input.input_id).data
+    if not view then return end
+    if ui.text_input.kind == "explorer_search" then
+      ctx.explorer_service.setSearch(ui.text_input.window_id, view.value)
+    elseif ui.text_input.kind == "explorer_rename" then
+      ctx.explorer_service.setRenameText(ui.text_input.window_id, view.value)
+    end
+  end
+
+  local function focus_text_input(ui, kind, window_id, value, cursor)
+    local id = input_id(kind, window_id)
+    ctx.text_input_service.focus(id, value or "", cursor)
+    ui.text_input = { kind = kind, window_id = window_id, input_id = id }
+    sync_text_input(ui)
+    return id
+  end
+
+  local function draw_text_editor(ui, x, y, width, value, active, input_id_value, text_color, bg_color)
+    value = tostring(value or "")
+    local view = active and input_view(input_id_value, value) or { value = value, cursor = #value }
+    local chars = math.max(1, math.floor(width / 6))
+    local shown = ellipsize(view.value, chars)
+    if active and view.selection_start and view.selection_end then
+      local left = math.min(view.selection_start, view.selection_end)
+      local right = math.max(view.selection_start, view.selection_end)
+      local sx = x + math.min(left, chars) * 6
+      local sw = math.max(1, (math.min(right, chars) - math.min(left, chars)) * 6)
+      rect(ui.gpu, sx, y - 2, sw, 11, COLORS.blue)
+    end
+    draw_text(ui.gpu, x, y, shown, text_color or COLORS.white, bg_color or -1)
+    if active then
+      local cursor_x = x + math.min(view.cursor or 0, chars) * 6
+      rect(ui.gpu, cursor_x, y - 2, 1, 12, text_color or COLORS.white)
+      rect(ui.gpu, cursor_x - 2, y - 3, 5, 1, text_color or COLORS.white)
+      rect(ui.gpu, cursor_x - 2, y + 10, 5, 1, text_color or COLORS.white)
+    end
+  end
+
   local function draw_explorer(ui, window, x, y, w, h)
     local explorer = ctx.explorer_service.list(window.id)
     if not explorer.ok then
@@ -689,9 +773,11 @@ function M.new(ctx)
     local search_w = math.max(42, math.min(80, main_w - 8))
     local search_x = main_x + main_w - search_w - 4
     small_round(ui.gpu, search_x, toolbar_y, search_w, 10, rgb(43, 48, 56))
-    local search_text = state.search ~= "" and state.search or "Search"
-    draw_text(ui.gpu, search_x + 5, toolbar_y + 2, ellipsize(search_text, math.floor((search_w - 8) / 6)), COLORS.white, -1)
-    add_hit(ui, "explorer_search", search_x, toolbar_y, search_w, 11, window.id)
+    local search_active = focused_input(ui, "explorer_search", window.id)
+    local search_key = input_id("explorer_search", window.id)
+    local search_text = state.search ~= "" and state.search or (search_active and "" or "Search")
+    draw_text_editor(ui, search_x + 5, toolbar_y + 2, search_w - 8, search_text, search_active, search_key, COLORS.white, -1)
+    add_hit(ui, "explorer_search", search_x, toolbar_y, search_w, 11, { window_id = window.id, text_x = search_x + 5 })
 
     local path_y = toolbar_y + 14
     draw_text(ui.gpu, main_x + 5, path_y, ellipsize(state.path, math.floor((main_w - 8) / 6)), COLORS.white, -1)
@@ -726,10 +812,10 @@ function M.new(ctx)
         local input_w = math.max(32, math.min(available_w, (#tostring(data.rename.value or "") * 6) + 14))
         rect(ui.gpu, name_x - 3, row_y - 3, input_w, 11, rgb(236, 241, 247))
         outline(ui.gpu, name_x - 3, row_y - 3, input_w, 11, COLORS.blue)
-        local cursor = (math.floor((ui.frame or 0) / 4) % 2 == 0) and "_" or ""
-        draw_text(ui.gpu, name_x + 1, row_y, ellipsize(tostring(data.rename.value or "") .. cursor, math.floor((input_w - 7) / 6)), COLORS.black, -1)
+        local rename_key = input_id("explorer_rename", window.id)
+        draw_text_editor(ui, name_x + 1, row_y, input_w - 7, tostring(data.rename.value or ""), focused_input(ui, "explorer_rename", window.id), rename_key, COLORS.black, -1)
         if extension ~= "" then draw_text(ui.gpu, name_x + input_w + 1, row_y, extension, COLORS.white, -1) end
-        add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, window.id)
+        add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, { window_id = window.id, text_x = name_x + 1 })
       else
         draw_text(ui.gpu, name_x, row_y, ellipsize(row.name, math.floor((main_w - 80) / 6)), COLORS.white, -1)
       end
@@ -741,7 +827,7 @@ function M.new(ctx)
         local extension_w = extension ~= "" and (#extension * 6 + 5) or 0
         local available_w = math.max(36, main_w - 76 - extension_w)
         local input_w = math.max(32, math.min(available_w, (#tostring(data.rename.value or "") * 6) + 14))
-        add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, window.id)
+        add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, { window_id = window.id, text_x = name_x + 1 })
       end
     end
     if #data.rows > visible_rows then
@@ -901,6 +987,83 @@ function M.new(ctx)
     end
   end
 
+  local function draw_studio(ui, window, x, y, w, h)
+    local project = ctx.studio_service.current().data
+    local content_x, content_y = x + 6, y + 21
+    local content_w, content_h = w - 12, h - 28
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(19, 22, 27))
+
+    local toolbar_h = 18
+    rect(ui.gpu, content_x, content_y, content_w, toolbar_h, rgb(36, 40, 48))
+    local bx = content_x + 6
+    local buttons = {
+      { id = "studio_new", label = "New" },
+      { id = "studio_save", label = "Save" },
+      { id = "studio_export", label = "Export" },
+      { id = "studio_insert", label = "Text", payload = "text" },
+      { id = "studio_insert", label = "Button", payload = "button" },
+      { id = "studio_insert", label = "Input", payload = "input" },
+      { id = "studio_insert", label = "Shape", payload = "shape" },
+    }
+    for _, button in ipairs(buttons) do
+      local bw = math.max(30, #button.label * 6 + 12)
+      if bx + bw < content_x + content_w - 4 then
+        small_round(ui.gpu, bx, content_y + 4, bw, 11, button.id == "studio_export" and COLORS.blue or rgb(66, 72, 84))
+        draw_text(ui.gpu, bx + 6, content_y + 6, button.label, COLORS.white, -1)
+        add_hit(ui, button.id, bx, content_y + 3, bw, 13, button.payload)
+        bx = bx + bw + 5
+      end
+    end
+
+    local body_y = content_y + toolbar_h + 5
+    local body_h = content_h - toolbar_h - 9
+    local code_w = math.max(94, math.floor(content_w * 0.43))
+    local preview_x = content_x + code_w + 6
+    local preview_w = content_w - code_w - 6
+    rect(ui.gpu, content_x, body_y, code_w, body_h, rgb(12, 14, 18))
+    rect(ui.gpu, preview_x, body_y, preview_w, body_h, rgb(242, 244, 248))
+    draw_text(ui.gpu, content_x + 8, body_y + 6, "Code", COLORS.white, -1)
+    draw_text(ui.gpu, preview_x + 8, body_y + 6, "Preview", COLORS.black, -1)
+    draw_text(ui.gpu, preview_x + 8, body_y + 20, ellipsize(project.name, math.floor((preview_w - 16) / 6)), COLORS.black, -1)
+
+    local code_lines = {
+      "app " .. project.id,
+      "name " .. project.name,
+      "components " .. tostring(#(project.components or {})),
+      "export -> user Apps",
+    }
+    local line_y = body_y + 22
+    for _, line in ipairs(code_lines) do
+      draw_text(ui.gpu, content_x + 8, line_y, ellipsize(line, math.floor((code_w - 16) / 6)), rgb(186, 220, 255), -1)
+      line_y = line_y + 12
+    end
+
+    local canvas_x, canvas_y = preview_x + 8, body_y + 35
+    local canvas_w, canvas_h = preview_w - 16, body_h - 43
+    rect(ui.gpu, canvas_x, canvas_y, canvas_w, canvas_h, COLORS.white)
+    outline(ui.gpu, canvas_x, canvas_y, canvas_w, canvas_h, rgb(205, 211, 220))
+    for index, component in ipairs(project.components or {}) do
+      local cx = canvas_x + math.min(canvas_w - 20, math.max(2, component.x or 2))
+      local cy = canvas_y + math.min(canvas_h - 12, math.max(2, component.y or 2))
+      local cw = math.min(canvas_w - (cx - canvas_x) - 2, component.w or 50)
+      local ch = math.min(canvas_h - (cy - canvas_y) - 2, component.h or 14)
+      if component.kind == "text" then
+        draw_text(ui.gpu, cx, cy, ellipsize(component.text or "Text", math.floor(cw / 6)), COLORS.black, -1)
+      elseif component.kind == "input" then
+        rect(ui.gpu, cx, cy, cw, ch, rgb(236, 240, 246)); outline(ui.gpu, cx, cy, cw, ch, rgb(160, 168, 180))
+        draw_text(ui.gpu, cx + 5, cy + 4, ellipsize(component.label or "Input", math.floor((cw - 10) / 6)), rgb(84, 88, 94), -1)
+      elseif component.kind == "shape" then
+        rect(ui.gpu, cx, cy, cw, ch, rgb(218, 225, 238)); outline(ui.gpu, cx, cy, cw, ch, COLORS.blue)
+      else
+        small_round(ui.gpu, cx, cy, cw, ch, COLORS.blue)
+        draw_text(ui.gpu, cx + 6, cy + 4, ellipsize(component.label or "Button", math.floor((cw - 12) / 6)), COLORS.white, -1)
+      end
+      if index == project.selected then outline(ui.gpu, cx - 2, cy - 2, cw + 4, ch + 4, COLORS.red) end
+    end
+    local status = project.dirty and "Unsaved" or "Saved"
+    draw_text(ui.gpu, content_x + content_w - (#status * 6) - 8, content_y + 6, status, COLORS.white, -1)
+  end
+
   local function draw_window(ui, window)
     if window.minimized then return end
     local x, y, w, h = window.x, window.y, window.w, window.h
@@ -921,6 +1084,8 @@ function M.new(ctx)
       draw_explorer(ui, window, x, y, w, h)
     elseif app_id == "dock.settings" then
       draw_settings(ui, window, x, y, w, h)
+    elseif app_id == "dock.studio" then
+      draw_studio(ui, window, x, y, w, h)
     elseif app_id == "dock.terminal" then
       draw_text(ui.gpu, content_x, content_y, "Terminal", COLORS.white, -1)
       draw_text(ui.gpu, content_x, content_y + 14, "Use dock commands from CraftOS.", COLORS.white, -1)
@@ -932,6 +1097,8 @@ function M.new(ctx)
   local function render(ui)
     ui.frame = (ui.frame or 0) + 1
     ui.hits = {}
+    local update_status = ctx.update_service and ctx.update_service.status().data.status or "idle"
+    if ctx.cursor_service then ctx.cursor_service.setBusy("dock.settings", update_status == "checking" or update_status == "installing") end
     draw_wallpaper(ui)
     draw_top(ui)
     for _, window in ipairs(ui.windows) do draw_window(ui, window) end
@@ -940,6 +1107,11 @@ function M.new(ctx)
     draw_menu(ui)
     draw_context(ui)
     draw_about(ui)
+    if ctx.cursor_service then
+      local hover = hit_at(ui, ui.cursor.x, ui.cursor.y)
+      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text)
+      ctx.cursor_service.draw(ui.gpu, kind, ui.frame)
+    end
     if ui.gpu.sync then pcall(ui.gpu.sync) end
   end
 
@@ -960,6 +1132,7 @@ function M.new(ctx)
 
   local function finish_text_input(ui, commit)
     if not ui.text_input then return end
+    sync_text_input(ui)
     local input = ui.text_input
     if input.kind == "explorer_rename" then
       if commit then ctx.explorer_service.commitRename(input.window_id) else ctx.explorer_service.cancelRename(input.window_id) end
@@ -980,6 +1153,8 @@ function M.new(ctx)
       finish_text_input(ui, true)
     end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
+    elseif hit.id == "top_menu" then
+      if hit.payload and hit.payload.action == "about" then ui.about = true else ctx.menu_service.dispatch(hit.payload and hit.payload.app_id, hit.payload and hit.payload.action, {}) end
     elseif hit.id == "about" then ui.about = true; ui.menu = false
     elseif hit.id == "about_close" then ui.about = false
     elseif hit.id == "reboot" then os.reboot()
@@ -994,8 +1169,25 @@ function M.new(ctx)
     elseif hit.id == "dock_keep" then pin_app(ui, hit.payload); ui.context = nil
     elseif hit.id == "explorer_sidebar" then ctx.explorer_service.navigate(hit.payload.window_id, hit.payload.path)
     elseif hit.id == "explorer_row" then ctx.explorer_service.select(hit.payload.window_id, hit.payload.path)
-    elseif hit.id == "explorer_search" then ui.text_input = { kind = "explorer_search", window_id = hit.payload }
-    elseif hit.id == "explorer_rename" then ui.text_input = { kind = "explorer_rename", window_id = hit.payload }
+    elseif hit.id == "explorer_search" then
+      local window_id = hit.payload.window_id
+      local state = ctx.explorer_service.state(window_id).data
+      local id = focus_text_input(ui, "explorer_search", window_id, state.search or "", #tostring(state.search or ""))
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, 6, false)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = "explorer_search", window_id = window_id, text_x = hit.payload.text_x }
+    elseif hit.id == "explorer_rename" then
+      local window_id = hit.payload.window_id
+      local listed = ctx.explorer_service.list(window_id)
+      local rename = listed.ok and listed.data.rename or nil
+      if not rename then
+        local started = ctx.explorer_service.startRename(window_id)
+        rename = started.ok and started.data or { value = "" }
+      end
+      local id = focus_text_input(ui, "explorer_rename", window_id, rename.value or "", #tostring(rename.value or ""))
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, 6, false)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = "explorer_rename", window_id = window_id, text_x = hit.payload.text_x }
     elseif hit.id == "explorer_back" then ctx.explorer_service.back(hit.payload)
     elseif hit.id == "explorer_forward" then ctx.explorer_service.forward(hit.payload)
     elseif hit.id == "explorer_up" then ctx.explorer_service.up(hit.payload)
@@ -1014,6 +1206,10 @@ function M.new(ctx)
     elseif hit.id == "settings_sub" then settings_go(ui, hit.payload)
     elseif hit.id == "settings_theme" then ctx.settings_service.set("user.theme", hit.payload)
     elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
+    elseif hit.id == "studio_new" then ctx.studio_service.newProject()
+    elseif hit.id == "studio_save" then ctx.studio_service.save()
+    elseif hit.id == "studio_export" then ctx.studio_service.exportApp()
+    elseif hit.id == "studio_insert" then ctx.studio_service.addComponent(hit.payload)
     elseif hit.id == "window_close" then close_window(ui, hit.payload)
     elseif hit.id == "window_min" then ctx.window_service.minimize(hit.payload, true); sync_windows(ui)
     elseif hit.id == "window_full" then ctx.window_service.toggleFullscreen(hit.payload); sync_windows(ui)
@@ -1028,40 +1224,49 @@ function M.new(ctx)
 
   local function handle_text_input(ui, event, a, b)
     if not ui.text_input then return false end
-    local window_id = ui.text_input.window_id
-    if ui.text_input.kind == "explorer_search" and event == "char" then
-      ctx.explorer_service.appendSearch(window_id, a)
+    local input = ui.text_input
+    local id = input.input_id or input_id(input.kind, input.window_id)
+    if event == "char" then
+      ctx.text_input_service.insert(id, a)
+      sync_text_input(ui)
       return true
-    elseif ui.text_input.kind == "explorer_search" and event == "paste" then
-      ctx.explorer_service.appendSearch(window_id, a)
+    elseif event == "paste" then
+      ctx.text_input_service.insert(id, a)
+      sync_text_input(ui)
       return true
-    elseif ui.text_input.kind == "explorer_search" and event == "tm_keyboard_char" then
-      ctx.explorer_service.appendSearch(window_id, b or a)
+    elseif event == "tm_keyboard_char" then
+      ctx.text_input_service.insert(id, b or a)
+      sync_text_input(ui)
       return true
-    elseif ui.text_input.kind == "explorer_search" and event == "tm_keyboard_paste" then
-      ctx.explorer_service.appendSearch(window_id, b or a)
-      return true
-    elseif ui.text_input.kind == "explorer_rename" and event == "char" then
-      ctx.explorer_service.appendRenameText(window_id, a)
-      return true
-    elseif ui.text_input.kind == "explorer_rename" and event == "paste" then
-      ctx.explorer_service.appendRenameText(window_id, a)
-      return true
-    elseif ui.text_input.kind == "explorer_rename" and event == "tm_keyboard_char" then
-      ctx.explorer_service.appendRenameText(window_id, b or a)
-      return true
-    elseif ui.text_input.kind == "explorer_rename" and event == "tm_keyboard_paste" then
-      ctx.explorer_service.appendRenameText(window_id, b or a)
+    elseif event == "tm_keyboard_paste" then
+      ctx.text_input_service.insert(id, b or a)
+      sync_text_input(ui)
       return true
     elseif event == "key" then
-      if ui.text_input.kind == "explorer_search" and keys and a == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
-      if ui.text_input.kind == "explorer_rename" and keys and a == keys.backspace then ctx.explorer_service.backspaceRenameText(window_id); return true end
+      if ui.modifiers.ctrl and keys and a == keys.c then ctx.text_input_service.copy(id); return true end
+      if ui.modifiers.ctrl and keys and a == keys.x then ctx.text_input_service.cut(id); sync_text_input(ui); return true end
+      if ui.modifiers.ctrl and keys and a == keys.v then ctx.text_input_service.paste(id); sync_text_input(ui); return true end
+      if ui.modifiers.ctrl and keys and a == keys.a then ctx.text_input_service.selectAll(id); return true end
+      if keys and a == keys.backspace then ctx.text_input_service.backspace(id); sync_text_input(ui); return true end
+      if keys and a == keys.delete then ctx.text_input_service.delete(id); sync_text_input(ui); return true end
+      if keys and a == keys.left then ctx.text_input_service.move(id, -1, ui.modifiers.shift); return true end
+      if keys and a == keys.right then ctx.text_input_service.move(id, 1, ui.modifiers.shift); return true end
+      if keys and a == keys.home then ctx.text_input_service.set(id, ctx.text_input_service.view(id).data.value, 0); return true end
+      if keys and a == keys["end"] then local view = ctx.text_input_service.view(id).data; ctx.text_input_service.set(id, view.value, #view.value); return true end
       if keys and (a == keys.enter or a == keys.numPadEnter) then finish_text_input(ui, true); return true end
       if keys and a == keys.escape then finish_text_input(ui, false); return true end
     elseif event == "tm_keyboard_key" then
       local key = b or a
-      if ui.text_input.kind == "explorer_search" and keys and key == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
-      if ui.text_input.kind == "explorer_rename" and keys and key == keys.backspace then ctx.explorer_service.backspaceRenameText(window_id); return true end
+      if ui.modifiers.ctrl and keys and key == keys.c then ctx.text_input_service.copy(id); return true end
+      if ui.modifiers.ctrl and keys and key == keys.x then ctx.text_input_service.cut(id); sync_text_input(ui); return true end
+      if ui.modifiers.ctrl and keys and key == keys.v then ctx.text_input_service.paste(id); sync_text_input(ui); return true end
+      if ui.modifiers.ctrl and keys and key == keys.a then ctx.text_input_service.selectAll(id); return true end
+      if keys and key == keys.backspace then ctx.text_input_service.backspace(id); sync_text_input(ui); return true end
+      if keys and key == keys.delete then ctx.text_input_service.delete(id); sync_text_input(ui); return true end
+      if keys and key == keys.left then ctx.text_input_service.move(id, -1, ui.modifiers.shift); return true end
+      if keys and key == keys.right then ctx.text_input_service.move(id, 1, ui.modifiers.shift); return true end
+      if keys and key == keys.home then ctx.text_input_service.set(id, ctx.text_input_service.view(id).data.value, 0); return true end
+      if keys and key == keys["end"] then local view = ctx.text_input_service.view(id).data; ctx.text_input_service.set(id, view.value, #view.value); return true end
       if keys and (key == keys.enter or key == keys.numPadEnter) then finish_text_input(ui, true); return true end
       if keys and key == keys.escape then finish_text_input(ui, false); return true end
     end
@@ -1075,8 +1280,21 @@ function M.new(ctx)
       local window = active_window(ui)
       if window and window.app_id == "dock.files" then
         local started = ctx.explorer_service.startRename(window.id)
-        if started.ok then ui.text_input = { kind = "explorer_rename", window_id = window.id }; return true end
+        if started.ok then focus_text_input(ui, "explorer_rename", window.id, started.data.value or "", #tostring(started.data.value or "")); return true end
       end
+    end
+    return false
+  end
+
+  local function handle_modifier_key(ui, event, a, b)
+    if not keys then return false end
+    local key = event == "tm_keyboard_key" and (b or a) or a
+    if event == "key" or event == "tm_keyboard_key" then
+      if key == keys.leftCtrl or key == keys.rightCtrl then ui.modifiers.ctrl = true; return true end
+      if key == keys.leftShift or key == keys.rightShift then ui.modifiers.shift = true; return true end
+    elseif event == "key_up" or event == "tm_keyboard_key_up" then
+      if key == keys.leftCtrl or key == keys.rightCtrl then ui.modifiers.ctrl = false; return true end
+      if key == keys.leftShift or key == keys.rightShift then ui.modifiers.shift = false; return true end
     end
     return false
   end
@@ -1088,17 +1306,25 @@ function M.new(ctx)
       if os.startTimer then os.startTimer(0.15) end
       local event, a, b, c, d = os.pullEvent()
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
-      if handle_text_input(ui, event, a, b) then
+      if handle_modifier_key(ui, event, a, b) then
+      elseif handle_text_input(ui, event, a, b) then
       elseif not ui.text_input and (event == "key" or event == "tm_keyboard_key") and handle_global_key(ui, event, a, b) then
       elseif event == "rednet_message" then ctx.net_service.handleMessage(a, b, c)
       elseif event == "key" and not ui.text_input and keys and a == keys.q then return { ok = true }
       else
         local mapped, button, x, y = pixel_event(event, a, b, c, d)
+        if (mapped == "mouse_click" or mapped == "mouse_drag" or mapped == "mouse_up" or mapped == "mouse_move") and ctx.cursor_service then
+          ctx.cursor_service.setPosition(x, y)
+          ui.cursor.x, ui.cursor.y = x, y
+        end
         if mapped == "mouse_click" then
           ui.selecting = nil
           handle_action(ui, hit_at(ui, x, y), button, x, y)
         elseif mapped == "mouse_drag" then
-          if ui.dragging_window then
+          if ui.dragging_text then
+            ctx.text_input_service.cursorFromX(ui.dragging_text.input_id, x, ui.dragging_text.text_x, 6, true)
+            sync_text_input(ui)
+          elseif ui.dragging_window then
             for _, window in ipairs(ui.windows) do
               if window.id == ui.dragging_window.id then
                 window.x = math.max(1, math.min(ui.width - window.w + 1, x - ui.dragging_window.dx))
@@ -1121,6 +1347,7 @@ function M.new(ctx)
           ui.dragging_dock = nil
           if ui.dragging_window then ctx.window_service.save() end
           ui.dragging_window = nil
+          ui.dragging_text = nil
           ui.selecting = nil
         elseif mapped == "peripheral" or mapped == "peripheral_detach" then
           ctx.device_service.scan()

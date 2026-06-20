@@ -157,6 +157,7 @@ function M.new(ctx)
       ipc = {},
       notification = {},
       process = {},
+      ui = {},
       user_service = {
         getCurrentUser = function() return ctx.user_service.getCurrentUser() end,
         getHome = function() return ctx.user_service.getHome() end,
@@ -171,6 +172,13 @@ function M.new(ctx)
       },
       shell_service = {
         printHelp = function() if ctx.shell_service then return ctx.shell_service.printHelp() end end,
+      },
+      studio_service = {
+        current = function() return ctx.studio_service.current() end,
+        newProject = function(name) return ctx.studio_service.newProject(name) end,
+        addComponent = function(kind) return ctx.studio_service.addComponent(kind) end,
+        save = function() return ctx.studio_service.save() end,
+        exportApp = function() return ctx.studio_service.exportApp() end,
       },
     }
 
@@ -217,6 +225,18 @@ function M.new(ctx)
       if not allowed.ok then return allowed end
       return service.launch(target_app_id, args or {})
     end
+
+    app_ctx.ui.menu = {
+      set = function(items) return ctx.menu_service.set(app_id, items or {}) end,
+      append = function(item) return ctx.menu_service.append(app_id, item or {}) end,
+      get = function() return ctx.menu_service.menuFor(app_id) end,
+    }
+
+    app_ctx.ui.text = {
+      focus = function(id, value, cursor) return ctx.text_input_service.focus(app_id .. ":" .. tostring(id or "input"), value, cursor) end,
+      get = function(id) return ctx.text_input_service.get(app_id .. ":" .. tostring(id or "input")) end,
+      set = function(id, value, cursor) return ctx.text_input_service.set(app_id .. ":" .. tostring(id or "input"), value, cursor) end,
+    }
 
     return app_ctx
   end

@@ -101,6 +101,18 @@ return {
     local splash_ok = pcall(function() splash.draw(fake_gpu, { message = "Selftest", progress = 50 }) end)
     check("splash helper", splash_ok)
     check("update service", ctx.update_service.status().ok and ctx.update_service.beginCheck().ok)
+    check("cursor service", ctx.cursor_service.infer({ id = "dock_app", payload = "dock.settings" }, false) == "click")
+    local text_id = "selftest-input"
+    ctx.text_input_service.focus(text_id, "hello", 5)
+    ctx.text_input_service.move(text_id, -2)
+    ctx.text_input_service.insert(text_id, "!")
+    check("text input service", ctx.text_input_service.view(text_id).data.value == "hel!lo")
+    local menu_set = ctx.menu_service.set("selftest.app", { { id = "build", label = "Build" } })
+    check("menu service", menu_set.ok and ctx.menu_service.menuFor("selftest.app").data[1].label == "Build")
+    local studio_new = ctx.studio_service.newProject("Selftest Studio App")
+    local studio_add = ctx.studio_service.addComponent("input")
+    local studio_export = ctx.studio_service.exportApp()
+    check("studio service", studio_new.ok and studio_add.ok and studio_export.ok and fs.exists(studio_export.data.manifest))
 
     local passed = 0
     for _, item in ipairs(checks) do

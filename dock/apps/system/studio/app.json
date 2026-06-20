@@ -1,0 +1,13 @@
+{
+  "id": "dock.studio",
+  "name": "App Studio",
+  "version": "0.0.1",
+  "entry": "main.lua",
+  "type": "system",
+  "category": "developer",
+  "icon": "studio",
+  "permissions": ["fs.read", "fs.write", "settings.read", "settings.write"],
+  "file_associations": ["code/lua", "data/json"],
+  "autoload": false,
+  "desktop": true
+}
