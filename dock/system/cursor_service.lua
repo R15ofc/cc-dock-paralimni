@@ -24,11 +24,12 @@ function M.new()
     settings_back = true, settings_forward = true, settings_nav = true, settings_sub = true,
     settings_theme = true, settings_update_install = true,
     studio_new = true, studio_save = true, studio_run = true, studio_export = true, studio_example = true, studio_icon = true, studio_insert = true, studio_field = true,
+    studio_resize = true, studio_code_panel = true,
     studio_component = true, app_component_button = true,
     top_menu = true, window_close = true, window_min = true, window_full = true,
   }
 
-  local text_inputs = { explorer_search = true, explorer_rename = true }
+  local text_inputs = { explorer_search = true, explorer_rename = true, studio_code_line = true }
   local draggable = { window_drag = true, dock_app = true, studio_splitter = true, studio_component = true }
   local denied = { dock_divider = true }
 

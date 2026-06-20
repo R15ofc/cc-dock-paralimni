@@ -42,6 +42,12 @@ local function copy_item(ctx, source, target)
   return ctx.safe_io.copyFile(source, target, ctx.safe_io.shouldCopyBinary(source))
 end
 
+local function path_inside(path, parent)
+  path = normalize(path)
+  parent = normalize(parent)
+  return path == parent or path:sub(1, #parent + 1) == parent .. "/"
+end
+
 local function trim(value)
   value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
   return value
@@ -213,6 +219,8 @@ function M.new(ctx)
         return ok(item)
       end
       if fs.isDir(path) then return service.navigate(id, path) end
+      local opened = ctx.fs_service.openFile(path)
+      if opened and opened.ok then return opened end
       item.preview = path
       return ok(item)
     end
@@ -225,9 +233,36 @@ function M.new(ctx)
   function service.openSelected(id)
     local item = state(id)
     if not item.selected then return err("nothing selected", "NO_SELECTION") end
+    if is_app_bundle(item.selected) then return service.select(id, item.selected) end
     if fs.isDir(item.selected) then return service.navigate(id, item.selected) end
+    local opened = ctx.fs_service.openFile(item.selected)
+    if opened and opened.ok then return opened end
     item.preview = item.selected
     return ok(item)
+  end
+
+  function service.movePathTo(id, source, target_dir)
+    local item = state(id)
+    source = normalize(source or item.selected)
+    target_dir = normalize(target_dir or item.path)
+    if source == "" or not fs.exists(source) then return err("source not found", "NOT_FOUND") end
+    if not fs.exists(target_dir) or not fs.isDir(target_dir) then return err("target folder not found", "NOT_FOUND") end
+    if fs.isDir(source) and path_inside(target_dir, source) then return err("cannot move folder into itself", "INVALID_TARGET") end
+    local target = unique_child_path(target_dir, fs.getName(source))
+    if normalize(fs.getDir(source)) == target_dir then return ok(source) end
+    local moved = ctx.fs_service.move(source, target)
+    if moved.ok then
+      item.selected = moved.data
+      item.rename = nil
+      item.preview = nil
+    end
+    return moved
+  end
+
+  function service.moveSelectedTo(id, target_dir)
+    local item = state(id)
+    if not item.selected then return err("nothing selected", "NO_SELECTION") end
+    return service.movePathTo(id, item.selected, target_dir)
   end
 
   function service.startRename(id)

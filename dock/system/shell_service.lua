@@ -442,6 +442,8 @@ function M.new(ctx)
       dragging_dock = nil,
       dragging_window = nil,
       dragging_studio = nil,
+      dragging_file = nil,
+      last_click = nil,
       dock_metrics = nil,
       text_input = nil,
       dragging_text = nil,
@@ -746,6 +748,14 @@ function M.new(ctx)
     outline(ui.gpu, x, y, w, h, COLORS.white)
   end
 
+  local function draw_drag_badge(ui)
+    if not ui.dragging_file then return end
+    local name = fs.getName(ui.dragging_file.path or "")
+    local x, y = math.min(ui.width - 92, ui.cursor.x + 9), math.min(ui.height - 20, ui.cursor.y + 8)
+    small_round(ui.gpu, x, y, 88, 15, rgb(22, 26, 32))
+    draw_text(ui.gpu, x + 6, y + 4, ellipsize(name, 12), COLORS.white, -1)
+  end
+
   local function input_id(kind, window_id)
     return tostring(kind) .. ":" .. tostring(window_id or "main")
   end
@@ -768,13 +778,15 @@ function M.new(ctx)
       ctx.explorer_service.setSearch(ui.text_input.window_id, view.value)
     elseif ui.text_input.kind == "explorer_rename" then
       ctx.explorer_service.setRenameText(ui.text_input.window_id, view.value)
+    elseif ui.text_input.kind == "studio_code" and ui.text_input.extra and ui.text_input.extra.line then
+      ctx.studio_service.setScriptLine(ui.text_input.extra.line, view.value)
     end
   end
 
-  local function focus_text_input(ui, kind, window_id, value, cursor)
+  local function focus_text_input(ui, kind, window_id, value, cursor, extra)
     local id = input_id(kind, window_id)
     ctx.text_input_service.focus(id, value or "", cursor)
-    ui.text_input = { kind = kind, window_id = window_id, input_id = id }
+    ui.text_input = { kind = kind, window_id = window_id, input_id = id, extra = extra }
     sync_text_input(ui)
     return id
   end
@@ -859,7 +871,7 @@ function M.new(ctx)
       if selected then rect(ui.gpu, content_x + 3, side_y - 2, sidebar_w - 6, 11, rgb(64, 78, 96)) end
       draw_file_icon(ui.gpu, content_x + 7, side_y - 1, true, selected)
       draw_text(ui.gpu, content_x + 22, side_y, ellipsize(item.name, math.floor((sidebar_w - 24) / 6)), COLORS.white, -1)
-      add_hit(ui, "explorer_sidebar", content_x + 3, side_y - 3, sidebar_w - 6, 12, { window_id = window.id, path = item.path })
+      add_hit(ui, "explorer_sidebar", content_x + 3, side_y - 3, sidebar_w - 6, 12, { window_id = window.id, path = item.path, target_dir = item.path })
       side_y = side_y + 13
       if side_y > content_y + content_h - 8 then break end
     end
@@ -892,7 +904,7 @@ function M.new(ctx)
       end
       local meta = row.dir and "folder" or format_size(row.size)
       draw_text(ui.gpu, main_x + main_w - 45, row_y, meta, COLORS.white, -1)
-      add_hit(ui, "explorer_row", main_x + 3, row_y - 3, main_w - 6, row_h, { window_id = window.id, path = row.path })
+      add_hit(ui, "explorer_row", main_x + 3, row_y - 3, main_w - 6, row_h, { window_id = window.id, path = row.path, target_dir = row.dir and row.path or nil })
       if renaming then
         local extension = data.rename.extension or ""
         local extension_w = extension ~= "" and (#extension * 6 + 5) or 0
@@ -1081,13 +1093,15 @@ function M.new(ctx)
 
   local function draw_studio_component(ui, component, cx, cy, cw, ch, selected, dark)
     local text_color = dark and COLORS.white or COLORS.black
+    local component_colors = { blue = COLORS.blue, red = COLORS.red, green = COLORS.green, white = rgb(245, 245, 245), dark = rgb(28, 31, 36), orange = rgb(255, 126, 38) }
     if component.kind == "text" then
       draw_text(ui.gpu, cx, cy + 3, ellipsize(component.text or "Text", math.floor(cw / 6)), text_color, -1)
     elseif component.kind == "input" then
       rect(ui.gpu, cx, cy, cw, ch, rgb(246, 248, 251)); outline(ui.gpu, cx, cy, cw, ch, rgb(160, 168, 180))
       draw_text(ui.gpu, cx + 5, cy + 4, ellipsize(component.label or "Input", math.floor((cw - 10) / 6)), rgb(84, 88, 94), -1)
     elseif component.kind == "shape" then
-      rect(ui.gpu, cx, cy, cw, ch, rgb(218, 225, 238)); outline(ui.gpu, cx, cy, cw, ch, COLORS.blue)
+      local color = component_colors[tostring(component.color or "blue"):lower()] or rgb(218, 225, 238)
+      rect(ui.gpu, cx, cy, cw, ch, color); outline(ui.gpu, cx, cy, cw, ch, rgb(228, 233, 242))
     elseif component.kind == "image" then
       rect(ui.gpu, cx, cy, cw, ch, rgb(235, 237, 241)); outline(ui.gpu, cx, cy, cw, ch, rgb(178, 184, 194))
       draw_placeholder_icon(ui.gpu, cx + math.max(2, math.floor((cw - 16) / 2)), cy + math.max(2, math.floor((ch - 16) / 2)))
@@ -1123,7 +1137,7 @@ function M.new(ctx)
       if cy + ch >= content_y and cy <= content_y + content_h then
         draw_studio_component(ui, component, cx, cy, cw, ch, false, false)
         if component.kind == "button" then
-          add_hit(ui, "app_component_button", cx, cy, cw, ch, { app_id = window.app_id, index = index, kind = "button", action = component.action, message = component.message })
+          add_hit(ui, "app_component_button", cx, cy, cw, ch, { app_id = window.app_id, id = component.id, index = index, kind = "button", action = component.action, message = component.message })
         end
       end
     end
@@ -1134,10 +1148,10 @@ function M.new(ctx)
     local project = ctx.studio_service.current().data
     local content_x, content_y = x + 6, y + 21
     local content_w, content_h = w - 12, h - 28
-    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(17, 19, 24))
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(13, 15, 20))
 
     local toolbar_h = 31
-    rect(ui.gpu, content_x, content_y, content_w, toolbar_h, rgb(30, 34, 42))
+    rect(ui.gpu, content_x, content_y, content_w, toolbar_h, rgb(25, 29, 37))
     local bx = content_x + 5
     local by = content_y + 4
     local buttons = {
@@ -1145,50 +1159,101 @@ function M.new(ctx)
       { id = "studio_save", label = "Save" },
       { id = "studio_run", label = "Run" },
       { id = "studio_export", label = "Export" },
-      { id = "studio_example", label = "Demo", payload = "notify" },
+      { id = "studio_example", label = "Notify", payload = "notify" },
+      { id = "studio_example", label = "Counter", payload = "counter" },
+      { id = "studio_example", label = "Duo", payload = "duo" },
       { id = "studio_icon", label = "Icon" },
       { id = "studio_insert", label = "Text", payload = "text" },
-      { id = "studio_insert", label = "Btn", payload = "button" },
+      { id = "studio_insert", label = "Button", payload = "button" },
       { id = "studio_insert", label = "Input", payload = "input" },
       { id = "studio_insert", label = "Shape", payload = "shape" },
       { id = "studio_insert", label = "Image", payload = "image" },
     }
     for _, button in ipairs(buttons) do
-      local bw = math.max(22, #button.label * 6 + 10)
-      if bx + bw > content_x + content_w - 5 then
+      local bw = math.max(24, #button.label * 6 + 10)
+      if bx + bw > content_x + content_w - 52 then
         bx = content_x + 5
         by = by + 13
       end
       if by + 11 <= content_y + toolbar_h - 2 then
-        small_round(ui.gpu, bx, by, bw, 11, button.id == "studio_run" and COLORS.green or (button.id == "studio_export" and COLORS.blue or rgb(62, 69, 82)))
+        local color = button.id == "studio_run" and COLORS.green or (button.id == "studio_export" and COLORS.blue or rgb(58, 65, 78))
+        small_round(ui.gpu, bx, by, bw, 11, color)
         draw_text(ui.gpu, bx + 5, by + 2, button.label, COLORS.white, -1)
         add_hit(ui, button.id, bx, by - 1, bw, 13, button.payload)
         bx = bx + bw + 4
       end
     end
+    local status = project.dirty and "Unsaved" or "Saved"
+    draw_text(ui.gpu, content_x + content_w - (#status * 6) - 8, content_y + 6, status, COLORS.white, -1)
 
     local body_y = content_y + toolbar_h + 4
     local body_h = content_h - toolbar_h - 8
-    local code_w = math.max(112, math.floor(content_w * 0.45))
-    local preview_x = content_x + code_w + 6
-    local preview_w = content_w - code_w - 6
-    rect(ui.gpu, content_x, body_y, code_w, body_h, rgb(10, 12, 16))
-    rect(ui.gpu, preview_x, body_y, preview_w, body_h, rgb(230, 233, 238))
-    draw_text(ui.gpu, content_x + 8, body_y + 6, "Code", COLORS.white, -1)
-    draw_text(ui.gpu, preview_x + 8, body_y + 6, "Preview", COLORS.black, -1)
+    local code_w = math.max(72, math.min(math.floor(content_w * 0.44), math.max(72, content_w - 90)))
+    local preview_x = content_x + code_w + 5
+    local preview_w = content_w - code_w - 5
+    local prop_h = project.components and project.components[project.selected or 0] and 28 or 0
+    local code_h = math.max(28, body_h - prop_h - (prop_h > 0 and 4 or 0))
+    rect(ui.gpu, content_x, body_y, code_w, body_h, rgb(8, 10, 14))
+    rect(ui.gpu, content_x, body_y, code_w, 14, rgb(15, 18, 24))
+    draw_text(ui.gpu, content_x + 8, body_y + 4, "DockScript", rgb(205, 226, 255), -1)
 
     local code = ctx.studio_service.sourceCode().data or project.code or ""
-    local line_y = body_y + 19
-    for line in (tostring(code) .. "\n"):gmatch("(.-)\n") do
-      draw_text(ui.gpu, content_x + 8, line_y, ellipsize(line, math.floor((code_w - 16) / 6)), rgb(184, 220, 255), -1)
-      line_y = line_y + 10
-      if line_y > body_y + body_h - 8 then break end
+    local lines = {}
+    for line in (tostring(code) .. "\n"):gmatch("(.-)\n") do table.insert(lines, line) end
+    local line_h = 10
+    local code_body_y = body_y + 16
+    local code_body_h = code_h - 18
+    local visible_lines = math.max(1, math.floor(code_body_h / line_h))
+    local max_code_scroll = math.max(0, #lines - visible_lines)
+    project.code_scroll = math.min(max_code_scroll, tonumber(project.code_scroll) or 0)
+    add_hit(ui, "studio_code_panel", content_x, code_body_y, code_w, code_body_h, { window_id = window.id })
+    for row = 1, visible_lines do
+      local line_index = row + (project.code_scroll or 0)
+      local line = lines[line_index]
+      if not line then break end
+      local line_y = code_body_y + (row - 1) * line_h
+      local text_x = content_x + 23
+      draw_text(ui.gpu, content_x + 5, line_y, tostring(line_index), rgb(84, 91, 104), -1)
+      local active = focused_input(ui, "studio_code", window.id) and ui.text_input and ui.text_input.extra and ui.text_input.extra.line == line_index
+      local line_key = input_id("studio_code", window.id)
+      if active then
+        rect(ui.gpu, text_x - 2, line_y - 2, code_w - 25, 11, rgb(238, 242, 248))
+        draw_text_editor(ui, text_x, line_y, code_w - 29, line, true, line_key, COLORS.black, -1)
+      else
+        draw_text(ui.gpu, text_x, line_y, ellipsize(line, math.floor((code_w - 29) / 6)), rgb(186, 218, 255), -1)
+      end
+      add_hit(ui, "studio_code_line", text_x - 3, line_y - 3, code_w - 20, 13, { window_id = window.id, line = line_index, value = line, text_x = text_x })
+    end
+    if max_code_scroll > 0 then
+      local metrics = scrollbar.metrics(#lines, visible_lines, project.code_scroll, content_x + code_w - 5, code_body_y, code_body_h)
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(30, 34, 42), thumb = rgb(90, 102, 122) })
     end
 
-    local viewport_x, viewport_y = preview_x + 7, body_y + 20
-    local viewport_w, viewport_h = preview_w - 14, body_h - 28
-    rect(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(207, 211, 218))
-    outline(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(176, 181, 190))
+    local selected = project.components and project.components[project.selected or 0]
+    if selected then
+      local py = body_y + code_h + 4
+      rect(ui.gpu, content_x, py, code_w, prop_h, rgb(20, 24, 31))
+      draw_text(ui.gpu, content_x + 6, py + 5, ellipsize((selected.kind or "node") .. " " .. (selected.id or ""), math.floor((code_w - 12) / 6)), COLORS.white, -1)
+      local sx = content_x + 6
+      local controls = {
+        { label = "W-", dw = -6, dh = 0 },
+        { label = "W+", dw = 6, dh = 0 },
+        { label = "H-", dw = 0, dh = -4 },
+        { label = "H+", dw = 0, dh = 4 },
+      }
+      for _, control in ipairs(controls) do
+        local cy = py + 16
+        small_round(ui.gpu, sx, cy, 18, 10, rgb(62, 69, 82))
+        draw_text(ui.gpu, sx + 3, cy + 2, control.label, COLORS.white, -1)
+        add_hit(ui, "studio_resize", sx, cy, 18, 11, { index = project.selected, dw = control.dw, dh = control.dh })
+        sx = sx + 21
+      end
+    end
+
+    local viewport_x, viewport_y = preview_x, body_y
+    local viewport_w, viewport_h = preview_w, body_h
+    rect(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(214, 219, 227))
+    outline(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(142, 149, 162))
     local app_w = math.max(120, (project.window and project.window.w) or 220)
     local app_h = math.max(80, (project.window and project.window.h) or 120)
     local max_scroll_x = math.max(0, app_w - viewport_w + 8)
@@ -1197,23 +1262,40 @@ function M.new(ctx)
     project.preview_scroll_y = math.min(max_scroll_y, tonumber(project.preview_scroll_y) or 0)
     local app_x = viewport_x + 4 - project.preview_scroll_x
     local app_y = viewport_y + 4 - project.preview_scroll_y
-    rect(ui.gpu, math.max(viewport_x + 1, app_x), math.max(viewport_y + 1, app_y), math.min(app_w, viewport_w - 2), math.min(app_h, viewport_h - 2), rgb(246, 247, 250))
-    rect(ui.gpu, math.max(viewport_x + 1, app_x), math.max(viewport_y + 1, app_y), math.min(app_w, viewport_w - 2), 18, rgb(28, 31, 36))
-    draw_control_button(ui.gpu, app_x + 5, app_y + 5, COLORS.red, "close")
-    draw_control_button(ui.gpu, app_x + 16, app_y + 5, COLORS.yellow, "min")
-    draw_control_button(ui.gpu, app_x + 27, app_y + 5, COLORS.green, "full")
-    draw_text(ui.gpu, app_x + 42, app_y + 6, ellipsize(project.name, math.floor((app_w - 46) / 6)), COLORS.white, -1)
-    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
+    local function clipped_rect(rx, ry, rw, rh, color)
+      local x1, y1 = math.max(viewport_x + 1, rx), math.max(viewport_y + 1, ry)
+      local x2, y2 = math.min(viewport_x + viewport_w - 2, rx + rw - 1), math.min(viewport_y + viewport_h - 2, ry + rh - 1)
+      if x2 >= x1 and y2 >= y1 then rect(ui.gpu, x1, y1, x2 - x1 + 1, y2 - y1 + 1, color) end
+    end
+    clipped_rect(app_x, app_y, app_w, app_h, rgb(246, 247, 250))
+    clipped_rect(app_x, app_y, app_w, 18, rgb(28, 31, 36))
+    if app_y >= viewport_y - 4 and app_y <= viewport_y + viewport_h then
+      if app_x + 5 >= viewport_x and app_x + 33 <= viewport_x + viewport_w then
+        draw_control_button(ui.gpu, app_x + 5, app_y + 5, COLORS.red, "close")
+        draw_control_button(ui.gpu, app_x + 16, app_y + 5, COLORS.yellow, "min")
+        draw_control_button(ui.gpu, app_x + 27, app_y + 5, COLORS.green, "full")
+      end
+      if app_x + 42 < viewport_x + viewport_w then
+        draw_text(ui.gpu, math.max(viewport_x + 2, app_x + 42), app_y + 6, ellipsize(project.name, math.floor((viewport_x + viewport_w - math.max(viewport_x + 2, app_x + 42)) / 6)), COLORS.white, -1)
+      end
+    end
+    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, titlebar_h = 22, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
     for index, component in ipairs(project.components or {}) do
       local cx = app_x + (component.x or 1)
       local cy = app_y + 22 + (component.y or 1)
       local cw = component.w or 60
       local ch = component.h or 16
-      if cx + cw >= viewport_x and cx <= viewport_x + viewport_w and cy + ch >= viewport_y and cy <= viewport_y + viewport_h then
-        draw_studio_component(ui, component, cx, cy, cw, ch, index == project.selected, false)
-        add_hit(ui, "studio_component", cx, cy, cw, ch, { index = index, app_x = app_x, app_y = app_y })
+      local inside = cx + cw >= viewport_x + 1 and cx <= viewport_x + viewport_w - 2 and cy + ch >= viewport_y + 1 and cy <= viewport_y + viewport_h - 2
+      if inside then
+        local draw_x = math.max(cx, viewport_x + 1)
+        local draw_y = math.max(cy, viewport_y + 1)
+        local draw_w = math.max(1, math.min(cx + cw, viewport_x + viewport_w - 2) - draw_x + 1)
+        local draw_h = math.max(1, math.min(cy + ch, viewport_y + viewport_h - 2) - draw_y + 1)
+        draw_studio_component(ui, component, draw_x, draw_y, draw_w, draw_h, index == project.selected, false)
+        add_hit(ui, "studio_component", draw_x, draw_y, draw_w, draw_h, { index = index, app_x = app_x, app_y = app_y, titlebar_h = 22 })
       end
     end
+    outline(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(142, 149, 162))
     if max_scroll_y > 0 then
       local metrics = scrollbar.metrics(app_h, viewport_h, project.preview_scroll_y, viewport_x + viewport_w - 5, viewport_y + 2, viewport_h - 4)
       scrollbar.draw(ui.gpu, metrics, { track = rgb(190, 196, 205), thumb = rgb(82, 90, 104) })
@@ -1224,8 +1306,6 @@ function M.new(ctx)
       local thumb_x = viewport_x + 2 + math.floor((project.preview_scroll_x / math.max(1, max_scroll_x)) * math.max(1, viewport_w - 4 - thumb_w))
       rect(ui.gpu, thumb_x, viewport_y + viewport_h - 5, thumb_w, 3, rgb(82, 90, 104))
     end
-    local status = project.dirty and "Unsaved" or "Saved"
-    draw_text(ui.gpu, content_x + content_w - (#status * 6) - 8, content_y + 6, status, COLORS.white, -1)
   end
 
   local function draw_window(ui, window)
@@ -1269,13 +1349,14 @@ function M.new(ctx)
     draw_top(ui)
     for _, window in ipairs(ui.windows) do draw_window(ui, window) end
     draw_selection(ui)
+    draw_drag_badge(ui)
     draw_dock(ui)
     draw_menu(ui)
     draw_context(ui)
     draw_about(ui)
     if ctx.cursor_service then
       local hover = hit_at(ui, ui.cursor.x, ui.cursor.y)
-      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text or ui.dragging_studio)
+      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text or ui.dragging_studio or ui.dragging_file)
       ctx.cursor_service.draw(ui.gpu, kind, ui.frame)
     end
     if ui.gpu.sync then pcall(ui.gpu.sync) end
@@ -1327,11 +1408,13 @@ function M.new(ctx)
       if button == 1 then ui.selecting = { x1 = x, y1 = y, x2 = x, y2 = y } end
       return
     end
-    if ui.text_input and ui.text_input.kind == "explorer_rename" and hit.id ~= "explorer_rename" then
-      finish_text_input(ui, true)
-    elseif ui.text_input and ui.text_input.kind == "explorer_search" and hit.id ~= "explorer_search" then
-      finish_text_input(ui, true)
-    end
+      if ui.text_input and ui.text_input.kind == "explorer_rename" and hit.id ~= "explorer_rename" then
+        finish_text_input(ui, true)
+      elseif ui.text_input and ui.text_input.kind == "explorer_search" and hit.id ~= "explorer_search" then
+        finish_text_input(ui, true)
+      elseif ui.text_input and ui.text_input.kind == "studio_code" and hit.id ~= "studio_code_line" then
+        finish_text_input(ui, true)
+      end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
     elseif hit.id == "top_menu" then
       if hit.payload and hit.payload.action == "system" then ui.menu = not ui.menu; ui.context = nil else ctx.menu_service.dispatch(hit.payload and hit.payload.app_id, hit.payload and hit.payload.action, {}) end
@@ -1348,7 +1431,20 @@ function M.new(ctx)
       end
     elseif hit.id == "dock_keep" then pin_app(ui, hit.payload); ui.context = nil
     elseif hit.id == "explorer_sidebar" then ctx.explorer_service.navigate(hit.payload.window_id, hit.payload.path)
-    elseif hit.id == "explorer_row" then ctx.explorer_service.select(hit.payload.window_id, hit.payload.path); sync_windows(ui)
+    elseif hit.id == "explorer_row" then
+      local now = os.clock and os.clock() or 0
+      local last = ui.last_click
+      local double_click = last and last.id == "explorer_row" and last.path == hit.payload.path and now - last.time <= 0.45
+      if double_click then
+        ctx.explorer_service.select(hit.payload.window_id, hit.payload.path)
+        ctx.explorer_service.openSelected(hit.payload.window_id)
+        ui.last_click = nil
+      else
+        ctx.explorer_service.select(hit.payload.window_id, hit.payload.path)
+        ui.last_click = { id = "explorer_row", path = hit.payload.path, time = now }
+        if button == 1 then ui.dragging_file = { window_id = hit.payload.window_id, path = hit.payload.path, start_x = x, start_y = y, active = false } end
+      end
+      sync_windows(ui)
     elseif hit.id == "explorer_search" then
       local window_id = hit.payload.window_id
       local state = ctx.explorer_service.state(window_id).data
@@ -1400,11 +1496,18 @@ function M.new(ctx)
         open_window(ui, project.id)
       end
     elseif hit.id == "studio_example" then ctx.studio_service.loadExample(hit.payload)
-    elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
-    elseif hit.id == "studio_insert" then ctx.studio_service.addComponent(hit.payload)
-    elseif hit.id == "studio_component" then
-      ctx.studio_service.selectComponent(hit.payload.index)
-      ui.dragging_studio = { index = hit.payload.index, dx = x - (hit.payload.app_x + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).x or 0)), dy = y - (hit.payload.app_y + 22 + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).y or 0)), app_x = hit.payload.app_x, app_y = hit.payload.app_y }
+      elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
+      elseif hit.id == "studio_insert" then ctx.studio_service.addComponent(hit.payload)
+      elseif hit.id == "studio_resize" then ctx.studio_service.resizeComponent(hit.payload.index, hit.payload.dw, hit.payload.dh)
+      elseif hit.id == "studio_code_line" then
+        local id = focus_text_input(ui, "studio_code", hit.payload.window_id, hit.payload.value or "", #tostring(hit.payload.value or ""), { line = hit.payload.line })
+        ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, 6, false)
+        sync_text_input(ui)
+        ui.dragging_text = { input_id = id, kind = "studio_code", window_id = hit.payload.window_id, text_x = hit.payload.text_x }
+      elseif hit.id == "studio_component" then
+        ctx.studio_service.selectComponent(hit.payload.index)
+        local titlebar_h = hit.payload.titlebar_h or 22
+        ui.dragging_studio = { index = hit.payload.index, titlebar_h = titlebar_h, dx = x - (hit.payload.app_x + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).x or 0)), dy = y - (hit.payload.app_y + titlebar_h + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).y or 0)), app_x = hit.payload.app_x, app_y = hit.payload.app_y }
     elseif hit.id == "app_component_button" then
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch("dock_app_event", hit.payload) end
       local runtime = ctx.app_runtime_service and ctx.app_runtime_service.stateForApp and ctx.app_runtime_service.stateForApp(hit.payload.app_id).data
@@ -1511,9 +1614,13 @@ function M.new(ctx)
 
   local function handle_scroll(ui, button, x, y)
     local hit = hit_at(ui, x, y)
-    if hit and hit.id == "studio_preview" then
-      if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
-      return true
+      if hit and (hit.id == "studio_code_panel" or hit.id == "studio_code_line") then
+        ctx.studio_service.scrollCode(button or 0)
+        return true
+      end
+      if hit and hit.id == "studio_preview" then
+        if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
+        return true
     end
     local window = active_window(ui)
     if window and window.app_id == "dock.settings" then settings_scroll(ui, button); return true end
@@ -1549,8 +1656,10 @@ function M.new(ctx)
           if ui.dragging_text then
             ctx.text_input_service.cursorFromX(ui.dragging_text.input_id, x, ui.dragging_text.text_x, 6, true)
             sync_text_input(ui)
-          elseif ui.dragging_studio then
-            ctx.studio_service.moveComponent(ui.dragging_studio.index, x - ui.dragging_studio.app_x - ui.dragging_studio.dx, y - ui.dragging_studio.app_y - 22 - ui.dragging_studio.dy)
+            elseif ui.dragging_studio then
+              ctx.studio_service.moveComponent(ui.dragging_studio.index, x - ui.dragging_studio.app_x - ui.dragging_studio.dx, y - ui.dragging_studio.app_y - (ui.dragging_studio.titlebar_h or 22) - ui.dragging_studio.dy)
+          elseif ui.dragging_file then
+            if math.abs(x - ui.dragging_file.start_x) + math.abs(y - ui.dragging_file.start_y) > 5 then ui.dragging_file.active = true end
           elseif ui.dragging_window then
             for _, window in ipairs(ui.windows) do
               if window.id == ui.dragging_window.id then
@@ -1562,6 +1671,11 @@ function M.new(ctx)
             ui.selecting.x2, ui.selecting.y2 = x, y
           end
         elseif mapped == "mouse_up" then
+          if ui.dragging_file and ui.dragging_file.active then
+            local drop = hit_at(ui, x, y)
+            local target_dir = drop and drop.payload and drop.payload.target_dir
+            if target_dir then ctx.explorer_service.movePathTo(ui.dragging_file.window_id, ui.dragging_file.path, target_dir); sync_windows(ui) end
+          end
           if ui.dragging_dock and ui.dock_metrics then
             local dock = ui.dock_metrics
             local inside_dock = x >= dock.x and x <= dock.x + dock.w - 1 and y >= dock.y and y <= dock.y + dock.h - 1
@@ -1575,6 +1689,7 @@ function M.new(ctx)
           if ui.dragging_window then ctx.window_service.save() end
           ui.dragging_window = nil
           ui.dragging_studio = nil
+          ui.dragging_file = nil
           ui.dragging_text = nil
           ui.selecting = nil
         elseif mapped == "mouse_scroll" then

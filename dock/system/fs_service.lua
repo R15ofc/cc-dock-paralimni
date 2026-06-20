@@ -188,7 +188,10 @@ function M.new(ctx)
     local file_type = service.getFileType(path).data
     local app = ctx.app_service.resolveFileAssociation(file_type)
     if not app.ok then return app end
-    return ctx.app_service.launch(app.data.id, { path })
+    local launched = ctx.app_service.launch(app.data.id, { path = path })
+    if not launched.ok then return launched end
+    if ctx.window_service then ctx.window_service.open(app.data.id, { x = 42, y = 24, w = 220, h = 120 }) end
+    return launched
   end
 
   return service
