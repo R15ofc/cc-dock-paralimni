@@ -177,6 +177,11 @@ function M.new(ctx)
         current = function() return ctx.studio_service.current() end,
         newProject = function(name) return ctx.studio_service.newProject(name) end,
         addComponent = function(kind) return ctx.studio_service.addComponent(kind) end,
+        selectComponent = function(index) return ctx.studio_service.selectComponent(index) end,
+        moveComponent = function(index, x, y) return ctx.studio_service.moveComponent(index, x, y) end,
+        setIcon = function(icon) return ctx.studio_service.setIcon(icon) end,
+        cycleIcon = function() return ctx.studio_service.cycleIcon() end,
+        loadExample = function(name) return ctx.studio_service.loadExample(name) end,
         save = function() return ctx.studio_service.save() end,
         exportApp = function() return ctx.studio_service.exportApp() end,
       },
@@ -217,7 +222,7 @@ function M.new(ctx)
     function app_ctx.notification.send(title, body)
       local allowed = check_permission(app_id, "notification.send")
       if not allowed.ok then return allowed end
-      return ctx.notification_service.add(title or manifest.name, body or "")
+      return ctx.notification_service.add(title or manifest.name, body or "", app_id)
     end
 
     function app_ctx.process.launch(target_app_id, args)
@@ -300,6 +305,23 @@ function M.new(ctx)
     return ok(out)
   end
 
+  function service.stateForApp(app_id)
+    local state = { app_id = app_id, running = false, loading = false, crashed = false, count = 0 }
+    for _, instance in ipairs(service.instances) do
+      if instance.app_id == app_id then
+        sync_instance(instance)
+        if instance.state == "ready" or instance.state == "running" then state.loading = true end
+        if instance.state == "ready" or instance.state == "running" or instance.state == "waiting" then
+          state.running = true
+          state.count = state.count + 1
+        elseif instance.state == "crashed" then
+          state.crashed = true
+        end
+      end
+    end
+    return ok(state)
+  end
+
   function service.get(instance_id)
     instance_id = tonumber(instance_id)
     for _, instance in ipairs(service.instances) do
@@ -319,6 +341,19 @@ function M.new(ctx)
       end
     end
     return err("instance not found", "NOT_FOUND")
+  end
+
+  function service.stopApp(app_id)
+    local stopped = {}
+    for _, instance in ipairs(service.instances) do
+      if instance.app_id == app_id and instance.pid and instance.state ~= "stopped" and instance.state ~= "crashed" then
+        local result = ctx.process_manager.stop(instance.pid)
+        sync_instance(instance)
+        if result.ok then table.insert(stopped, instance.id) end
+      end
+    end
+    if ctx.event_bus then ctx.event_bus.emit("app_stopped", { app_id = app_id }) end
+    return ok(stopped)
   end
 
   function service.start()

@@ -13,6 +13,15 @@ local function is_dir(path)
   return fs.exists(path) and fs.isDir(path)
 end
 
+local function is_app_bundle(path)
+  return fs.exists(path) and fs.isDir(path) and fs.getName(path):match("%.app$") and fs.exists(fs.combine(path, "app.json"))
+end
+
+local function app_display_name(path)
+  local name = fs.getName(path)
+  return name:gsub("%.app$", "")
+end
+
 local function unique_child_path(parent, wanted_name)
   local base = tostring(wanted_name or "Untitled")
   local candidate = fs.combine(parent, base)
@@ -49,6 +58,7 @@ end
 
 local function split_editable_name(path)
   local name = fs.getName(path)
+  if is_app_bundle(path) then return app_display_name(path), ".app" end
   if fs.isDir(path) then return name, "" end
   local base, extension = name:match("^(.*)(%.[^%.]+)$")
   if not base or base == "" then return name, "" end
@@ -132,6 +142,10 @@ function M.new(ctx)
     local rows = {}
     for _, row in ipairs(listed.data or {}) do
       if search == "" or row.name:lower():find(search, 1, true) then
+        if is_app_bundle(row.path) then
+          row.display_name = app_display_name(row.path)
+          row.bundle = "app"
+        end
         row.type = ctx.fs_service.getFileType(row.path).data
         row.category = ctx.fs_service.getCategory(row.path).data
         row.selected = item.selected == row.path
@@ -142,8 +156,10 @@ function M.new(ctx)
     if item.selected and fs.exists(item.selected) then
       selected_meta = {
         name = fs.getName(item.selected),
+        display_name = is_app_bundle(item.selected) and app_display_name(item.selected) or fs.getName(item.selected),
         path = item.selected,
         dir = fs.isDir(item.selected),
+        bundle = is_app_bundle(item.selected) and "app" or nil,
         size = fs.isDir(item.selected) and 0 or fs.getSize(item.selected),
         type = ctx.fs_service.getFileType(item.selected).data,
         preview = item.preview == item.selected,
@@ -184,6 +200,18 @@ function M.new(ctx)
     path = normalize(path)
     if not fs.exists(path) then return err("path not found: " .. path, "NOT_FOUND") end
     if item.selected == path then
+      if is_app_bundle(path) then
+        local manifest = ctx.safe_io.readJson(fs.combine(path, "app.json"), nil)
+        if manifest.ok and manifest.data and manifest.data.id then
+          if ctx.app_service then ctx.app_service.scanApps() end
+          if ctx.app_runtime_service and ctx.app_runtime_service.stateForApp then
+            local state_for_app = ctx.app_runtime_service.stateForApp(manifest.data.id).data
+            if not state_for_app.running then ctx.app_runtime_service.launch(manifest.data.id, {}) end
+          end
+          if ctx.window_service then ctx.window_service.open(manifest.data.id, { x = 46, y = 26, w = 220, h = 120 }) end
+        end
+        return ok(item)
+      end
       if fs.isDir(path) then return service.navigate(id, path) end
       item.preview = path
       return ok(item)

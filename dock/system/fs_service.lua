@@ -119,6 +119,7 @@ function M.new(ctx)
   end
 
   function service.getFileType(path)
+    if fs.isDir(path) and fs.getName(path):match("%.app$") and fs.exists(fs.combine(path, "app.json")) then return ok("application/bundle") end
     if fs.isDir(path) then return ok("folder") end
     if path:match("%.app%.json$") or fs.getName(path) == "app.json" then return ok("application/manifest") end
     if path:match("%.link%.json$") then return ok("desktop/shortcut") end

@@ -232,7 +232,7 @@ function M.new(ctx)
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
     safe_print("dock explorer [go|back|up|search|select|rename|new-folder|new-file|copy|cut|paste|trash]")
     safe_print("dock update [check|status|install]")
-    safe_print("dock studio [new|save|export|add <text|button|input|shape|image>]")
+    safe_print("dock studio [new|save|export|icon <name>|example <notify|counter>|add <text|button|input|shape|image>]")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
     safe_print("dock trash <path> | restore <trash_id> | search <query>")
@@ -335,6 +335,8 @@ function M.new(ctx)
       if action == "new" then result = ctx.studio_service.newProject(join_words(args, 3))
       elseif action == "save" then result = ctx.studio_service.save()
       elseif action == "export" then result = ctx.studio_service.exportApp()
+      elseif action == "icon" then result = ctx.studio_service.setIcon(args[3] or "placeholder")
+      elseif action == "example" then result = ctx.studio_service.loadExample(args[3] or "notify")
       elseif action == "add" then result = ctx.studio_service.addComponent(args[3] or "text")
       else result = ctx.studio_service.current() end
       if not result.ok then return print_result(result) end
@@ -428,6 +430,7 @@ function M.new(ctx)
       selecting = nil,
       dragging_dock = nil,
       dragging_window = nil,
+      dragging_studio = nil,
       dock_metrics = nil,
       text_input = nil,
       dragging_text = nil,
@@ -469,7 +472,7 @@ function M.new(ctx)
     ui.active = ctx.window_service.activeId().data
   end
 
-  local active_window, active_app_id
+  local active_window, active_app_id, focus_window
 
   local function draw_wallpaper(ui)
     local exact_path = paths.join(paths.assets, "wallpaper-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png")
@@ -510,6 +513,12 @@ function M.new(ctx)
   end
 
   local function open_window(ui, app_id)
+    for _, window in ipairs(ui.windows or {}) do
+      if window.app_id == app_id and not window.minimized then
+        focus_window(ui, window.id)
+        return
+      end
+    end
     local geometry = { x = 42, y = 24, w = math.min(220, ui.width - 70), h = math.min(120, ui.height - 58) }
     if app_id == "dock.files" then
       geometry = { x = 24, y = 20, w = math.min(330, ui.width - 38), h = math.min(138, ui.height - 58) }
@@ -517,6 +526,11 @@ function M.new(ctx)
       geometry = { x = 32, y = 20, w = math.min(290, ui.width - 54), h = math.min(136, ui.height - 58) }
     elseif app_id == "dock.studio" then
       geometry = { x = 22, y = 18, w = math.min(340, ui.width - 36), h = math.min(142, ui.height - 56) }
+    end
+    local app = ctx.app_service.getApp(app_id)
+    if app.ok and app.data.manifest.type ~= "system" and ctx.app_runtime_service and ctx.app_runtime_service.stateForApp then
+      local runtime = ctx.app_runtime_service.stateForApp(app_id).data
+      if not runtime.running then ctx.app_runtime_service.launch(app_id, {}) end
     end
     ctx.window_service.open(app_id, geometry)
     sync_windows(ui)
@@ -592,7 +606,36 @@ function M.new(ctx)
     return pinned, opened
   end
 
+  local function dock_state_for_app(ui, app_id)
+    local state = { running = false, loading = false, notify = false }
+    for _, window in ipairs(ui.windows or {}) do
+      if window.app_id == app_id and not window.minimized then state.running = true end
+    end
+    if ctx.app_runtime_service and ctx.app_runtime_service.stateForApp then
+      local runtime = ctx.app_runtime_service.stateForApp(app_id)
+      if runtime.ok and runtime.data then
+        state.running = state.running or runtime.data.running
+        state.loading = runtime.data.loading
+      end
+    end
+    if ctx.notification_service and ctx.notification_service.recentForApp then
+      local recent = ctx.notification_service.recentForApp(app_id, 2.2)
+      state.notify = recent.ok and recent.data ~= nil
+    end
+    return state
+  end
+
+  local function draw_placeholder_icon(gpu, x, y)
+    small_round(gpu, x + 1, y + 1, 14, 14, rgb(242, 243, 245))
+    rect(gpu, x + 3, y + 3, 10, 2, rgb(198, 200, 204))
+    outline(gpu, x + 4, y + 5, 8, 8, rgb(198, 200, 204))
+    rect(gpu, x + 7, y + 8, 3, 3, rgb(188, 190, 194))
+  end
+
   local function draw_icon_square(ui, x, y, app, active)
+    local state = dock_state_for_app(ui, app.manifest.id)
+    local bounce = (state.loading or state.notify) and math.max(0, math.floor(2 + math.sin((ui.frame or 0) * 0.9) * 2)) or 0
+    y = y - bounce
     small_round(ui.gpu, x, y, 16, 16, active and COLORS.blue or COLORS.red)
     local icon = app.manifest.icon
     if icon == "folder" then
@@ -609,9 +652,12 @@ function M.new(ctx)
       rect(ui.gpu, x + 4, y + 7, 8, 1, COLORS.white)
       rect(ui.gpu, x + 4, y + 10, 6, 1, COLORS.white)
       rect(ui.gpu, x + 12, y + 10, 2, 3, COLORS.white)
+    elseif icon == "placeholder" then
+      draw_placeholder_icon(ui.gpu, x, y)
     else
       rect(ui.gpu, x + 5, y + 5, 6, 6, COLORS.white)
     end
+    if state.running then rect(ui.gpu, x + 7, y + 18 + bounce, 3, 2, COLORS.white) end
     add_hit(ui, "dock_app", x - 2, y - 2, 20, 20, app.manifest.id)
   end
 
@@ -815,7 +861,7 @@ function M.new(ctx)
       local row = data.rows[index]
       local row_y = list_y + ((index - start_index) * row_h)
       if row.selected then rect(ui.gpu, main_x + 3, row_y - 2, main_w - 6, row_h, rgb(0, 92, 180)) end
-      draw_file_icon(ui.gpu, main_x + 8, row_y - 2, row.dir, row.selected)
+      if row.bundle == "app" then draw_placeholder_icon(ui.gpu, main_x + 6, row_y - 4) else draw_file_icon(ui.gpu, main_x + 8, row_y - 2, row.dir, row.selected) end
       local renaming = data.rename and data.rename.path == row.path
       local name_x = main_x + 23
       if renaming then
@@ -830,7 +876,7 @@ function M.new(ctx)
         if extension ~= "" then draw_text(ui.gpu, name_x + input_w + 1, row_y, extension, COLORS.white, -1) end
         add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, { window_id = window.id, text_x = name_x + 1 })
       else
-        draw_text(ui.gpu, name_x, row_y, ellipsize(row.name, math.floor((main_w - 80) / 6)), COLORS.white, -1)
+        draw_text(ui.gpu, name_x, row_y, ellipsize(row.display_name or row.name, math.floor((main_w - 80) / 6)), COLORS.white, -1)
       end
       local meta = row.dir and "folder" or format_size(row.size)
       draw_text(ui.gpu, main_x + main_w - 45, row_y, meta, COLORS.white, -1)
@@ -858,7 +904,7 @@ function M.new(ctx)
     local status_y = content_y + content_h - 10
     rect(ui.gpu, main_x, status_y - 2, main_w, 10, rgb(24, 28, 33))
     if data.selected then
-      local status = data.selected.name .. " | " .. (data.selected.dir and "folder" or format_size(data.selected.size)) .. " | " .. tostring(data.selected.type)
+      local status = (data.selected.display_name or data.selected.name) .. " | " .. (data.selected.bundle == "app" and "application" or (data.selected.dir and "folder" or format_size(data.selected.size))) .. " | " .. tostring(data.selected.type)
       draw_text(ui.gpu, main_x + 5, status_y, ellipsize(status, math.floor((main_w - 10) / 6)), COLORS.white, -1)
     elseif data.clipboard then
       draw_text(ui.gpu, main_x + 5, status_y, "Clipboard: " .. data.clipboard.action .. " " .. data.clipboard.name, COLORS.white, -1)
@@ -966,6 +1012,9 @@ function M.new(ctx)
         draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Installing Update", ui.frame), rgb(116, 121, 128), -1)
       elseif update.status == "installed" then
         draw_text(ui.gpu, card_x + 12, card_y + 14, "Update installed. Reboot required.", rgb(60, 64, 70), -1)
+      elseif update.status == "error" then
+        draw_text(ui.gpu, card_x + 12, card_y + 14, "Update check failed", COLORS.red, -1)
+        draw_text(ui.gpu, card_x + 12, card_y + 28, ellipsize(update.error or "Network error", math.floor((card_w - 24) / 6)), rgb(84, 88, 94), -1)
       else
         draw_text(ui.gpu, card_x + 12, card_y + 14, "No updates", rgb(116, 121, 128), -1)
       end
@@ -1018,78 +1067,150 @@ function M.new(ctx)
     end
   end
 
+  local function draw_studio_component(ui, component, cx, cy, cw, ch, selected, dark)
+    local text_color = dark and COLORS.white or COLORS.black
+    if component.kind == "text" then
+      draw_text(ui.gpu, cx, cy + 3, ellipsize(component.text or "Text", math.floor(cw / 6)), text_color, -1)
+    elseif component.kind == "input" then
+      rect(ui.gpu, cx, cy, cw, ch, rgb(246, 248, 251)); outline(ui.gpu, cx, cy, cw, ch, rgb(160, 168, 180))
+      draw_text(ui.gpu, cx + 5, cy + 4, ellipsize(component.label or "Input", math.floor((cw - 10) / 6)), rgb(84, 88, 94), -1)
+    elseif component.kind == "shape" then
+      rect(ui.gpu, cx, cy, cw, ch, rgb(218, 225, 238)); outline(ui.gpu, cx, cy, cw, ch, COLORS.blue)
+    elseif component.kind == "image" then
+      rect(ui.gpu, cx, cy, cw, ch, rgb(235, 237, 241)); outline(ui.gpu, cx, cy, cw, ch, rgb(178, 184, 194))
+      draw_placeholder_icon(ui.gpu, cx + math.max(2, math.floor((cw - 16) / 2)), cy + math.max(2, math.floor((ch - 16) / 2)))
+    else
+      small_round(ui.gpu, cx, cy, cw, ch, COLORS.blue)
+      draw_text(ui.gpu, cx + 6, cy + 4, ellipsize(component.label or "Button", math.floor((cw - 12) / 6)), COLORS.white, -1)
+    end
+    if selected then outline(ui.gpu, cx - 2, cy - 2, cw + 4, ch + 4, COLORS.red) end
+  end
+
+  local function read_app_ui(app)
+    if not app or not app.source_dir then return nil end
+    local path = fs.combine(app.source_dir, "ui.json")
+    if not fs.exists(path) then return nil end
+    local read = ctx.safe_io.readJson(path, nil)
+    if read.ok and type(read.data) == "table" then return read.data end
+    return nil
+  end
+
+  local function draw_generated_app(ui, window, x, y, w, h)
+    local view = read_app_ui(window.app)
+    if not view then return false end
+    local content_x, content_y = x + 8, y + 24
+    local content_w, content_h = w - 16, h - 32
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(246, 247, 250))
+    draw_text(ui.gpu, content_x + 8, content_y + 8, ellipsize(view.name or window.app.manifest.name, math.floor((content_w - 16) / 6)), COLORS.black, -1)
+    local offset_y = content_y + 24
+    for index, component in ipairs(view.components or {}) do
+      local cx = content_x + math.max(1, component.x or 1)
+      local cy = offset_y + math.max(1, component.y or 1)
+      local cw = math.max(16, math.min(content_w - (cx - content_x) - 3, component.w or 60))
+      local ch = math.max(10, math.min(content_h - (cy - content_y) - 3, component.h or 16))
+      if cy + ch >= content_y and cy <= content_y + content_h then
+        draw_studio_component(ui, component, cx, cy, cw, ch, false, false)
+        if component.kind == "button" then
+          add_hit(ui, "app_component_button", cx, cy, cw, ch, { app_id = window.app_id, index = index, kind = "button", action = component.action, message = component.message })
+        end
+      end
+    end
+    return true
+  end
+
   local function draw_studio(ui, window, x, y, w, h)
     local project = ctx.studio_service.current().data
     local content_x, content_y = x + 6, y + 21
     local content_w, content_h = w - 12, h - 28
-    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(19, 22, 27))
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(17, 19, 24))
 
-    local toolbar_h = 18
-    rect(ui.gpu, content_x, content_y, content_w, toolbar_h, rgb(36, 40, 48))
-    local bx = content_x + 6
+    local toolbar_h = 31
+    rect(ui.gpu, content_x, content_y, content_w, toolbar_h, rgb(30, 34, 42))
+    local bx = content_x + 5
+    local by = content_y + 4
     local buttons = {
       { id = "studio_new", label = "New" },
       { id = "studio_save", label = "Save" },
+      { id = "studio_run", label = "Run" },
       { id = "studio_export", label = "Export" },
+      { id = "studio_example", label = "Demo", payload = "notify" },
+      { id = "studio_icon", label = "Icon" },
       { id = "studio_insert", label = "Text", payload = "text" },
-      { id = "studio_insert", label = "Button", payload = "button" },
+      { id = "studio_insert", label = "Btn", payload = "button" },
       { id = "studio_insert", label = "Input", payload = "input" },
       { id = "studio_insert", label = "Shape", payload = "shape" },
+      { id = "studio_insert", label = "Image", payload = "image" },
     }
     for _, button in ipairs(buttons) do
-      local bw = math.max(30, #button.label * 6 + 12)
-      if bx + bw < content_x + content_w - 4 then
-        small_round(ui.gpu, bx, content_y + 4, bw, 11, button.id == "studio_export" and COLORS.blue or rgb(66, 72, 84))
-        draw_text(ui.gpu, bx + 6, content_y + 6, button.label, COLORS.white, -1)
-        add_hit(ui, button.id, bx, content_y + 3, bw, 13, button.payload)
-        bx = bx + bw + 5
+      local bw = math.max(22, #button.label * 6 + 10)
+      if bx + bw > content_x + content_w - 5 then
+        bx = content_x + 5
+        by = by + 13
+      end
+      if by + 11 <= content_y + toolbar_h - 2 then
+        small_round(ui.gpu, bx, by, bw, 11, button.id == "studio_run" and COLORS.green or (button.id == "studio_export" and COLORS.blue or rgb(62, 69, 82)))
+        draw_text(ui.gpu, bx + 5, by + 2, button.label, COLORS.white, -1)
+        add_hit(ui, button.id, bx, by - 1, bw, 13, button.payload)
+        bx = bx + bw + 4
       end
     end
 
-    local body_y = content_y + toolbar_h + 5
-    local body_h = content_h - toolbar_h - 9
-    local code_w = math.max(94, math.floor(content_w * 0.43))
+    local body_y = content_y + toolbar_h + 4
+    local body_h = content_h - toolbar_h - 8
+    local code_w = math.max(112, math.floor(content_w * 0.45))
     local preview_x = content_x + code_w + 6
     local preview_w = content_w - code_w - 6
-    rect(ui.gpu, content_x, body_y, code_w, body_h, rgb(12, 14, 18))
-    rect(ui.gpu, preview_x, body_y, preview_w, body_h, rgb(242, 244, 248))
+    rect(ui.gpu, content_x, body_y, code_w, body_h, rgb(10, 12, 16))
+    rect(ui.gpu, preview_x, body_y, preview_w, body_h, rgb(230, 233, 238))
     draw_text(ui.gpu, content_x + 8, body_y + 6, "Code", COLORS.white, -1)
     draw_text(ui.gpu, preview_x + 8, body_y + 6, "Preview", COLORS.black, -1)
-    draw_text(ui.gpu, preview_x + 8, body_y + 20, ellipsize(project.name, math.floor((preview_w - 16) / 6)), COLORS.black, -1)
 
-    local code_lines = {
-      "app " .. project.id,
-      "name " .. project.name,
-      "components " .. tostring(#(project.components or {})),
-      "export -> user Apps",
-    }
-    local line_y = body_y + 22
-    for _, line in ipairs(code_lines) do
-      draw_text(ui.gpu, content_x + 8, line_y, ellipsize(line, math.floor((code_w - 16) / 6)), rgb(186, 220, 255), -1)
-      line_y = line_y + 12
+    local code = ctx.studio_service.sourceCode().data or project.code or ""
+    local line_y = body_y + 19
+    for line in (tostring(code) .. "\n"):gmatch("(.-)\n") do
+      draw_text(ui.gpu, content_x + 8, line_y, ellipsize(line, math.floor((code_w - 16) / 6)), rgb(184, 220, 255), -1)
+      line_y = line_y + 10
+      if line_y > body_y + body_h - 8 then break end
     end
 
-    local canvas_x, canvas_y = preview_x + 8, body_y + 35
-    local canvas_w, canvas_h = preview_w - 16, body_h - 43
-    rect(ui.gpu, canvas_x, canvas_y, canvas_w, canvas_h, COLORS.white)
-    outline(ui.gpu, canvas_x, canvas_y, canvas_w, canvas_h, rgb(205, 211, 220))
+    local viewport_x, viewport_y = preview_x + 7, body_y + 20
+    local viewport_w, viewport_h = preview_w - 14, body_h - 28
+    rect(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(207, 211, 218))
+    outline(ui.gpu, viewport_x, viewport_y, viewport_w, viewport_h, rgb(176, 181, 190))
+    local app_w = math.max(120, (project.window and project.window.w) or 220)
+    local app_h = math.max(80, (project.window and project.window.h) or 120)
+    local max_scroll_x = math.max(0, app_w - viewport_w + 8)
+    local max_scroll_y = math.max(0, app_h - viewport_h + 8)
+    project.preview_scroll_x = math.min(max_scroll_x, tonumber(project.preview_scroll_x) or 0)
+    project.preview_scroll_y = math.min(max_scroll_y, tonumber(project.preview_scroll_y) or 0)
+    local app_x = viewport_x + 4 - project.preview_scroll_x
+    local app_y = viewport_y + 4 - project.preview_scroll_y
+    rect(ui.gpu, math.max(viewport_x + 1, app_x), math.max(viewport_y + 1, app_y), math.min(app_w, viewport_w - 2), math.min(app_h, viewport_h - 2), rgb(246, 247, 250))
+    rect(ui.gpu, math.max(viewport_x + 1, app_x), math.max(viewport_y + 1, app_y), math.min(app_w, viewport_w - 2), 18, rgb(28, 31, 36))
+    draw_control_button(ui.gpu, app_x + 5, app_y + 5, COLORS.red, "close")
+    draw_control_button(ui.gpu, app_x + 16, app_y + 5, COLORS.yellow, "min")
+    draw_control_button(ui.gpu, app_x + 27, app_y + 5, COLORS.green, "full")
+    draw_text(ui.gpu, app_x + 42, app_y + 6, ellipsize(project.name, math.floor((app_w - 46) / 6)), COLORS.white, -1)
+    add_hit(ui, "studio_preview", viewport_x, viewport_y, viewport_w, viewport_h, { app_x = app_x, app_y = app_y, max_scroll_x = max_scroll_x, max_scroll_y = max_scroll_y })
     for index, component in ipairs(project.components or {}) do
-      local cx = canvas_x + math.min(canvas_w - 20, math.max(2, component.x or 2))
-      local cy = canvas_y + math.min(canvas_h - 12, math.max(2, component.y or 2))
-      local cw = math.min(canvas_w - (cx - canvas_x) - 2, component.w or 50)
-      local ch = math.min(canvas_h - (cy - canvas_y) - 2, component.h or 14)
-      if component.kind == "text" then
-        draw_text(ui.gpu, cx, cy, ellipsize(component.text or "Text", math.floor(cw / 6)), COLORS.black, -1)
-      elseif component.kind == "input" then
-        rect(ui.gpu, cx, cy, cw, ch, rgb(236, 240, 246)); outline(ui.gpu, cx, cy, cw, ch, rgb(160, 168, 180))
-        draw_text(ui.gpu, cx + 5, cy + 4, ellipsize(component.label or "Input", math.floor((cw - 10) / 6)), rgb(84, 88, 94), -1)
-      elseif component.kind == "shape" then
-        rect(ui.gpu, cx, cy, cw, ch, rgb(218, 225, 238)); outline(ui.gpu, cx, cy, cw, ch, COLORS.blue)
-      else
-        small_round(ui.gpu, cx, cy, cw, ch, COLORS.blue)
-        draw_text(ui.gpu, cx + 6, cy + 4, ellipsize(component.label or "Button", math.floor((cw - 12) / 6)), COLORS.white, -1)
+      local cx = app_x + (component.x or 1)
+      local cy = app_y + 22 + (component.y or 1)
+      local cw = component.w or 60
+      local ch = component.h or 16
+      if cx + cw >= viewport_x and cx <= viewport_x + viewport_w and cy + ch >= viewport_y and cy <= viewport_y + viewport_h then
+        draw_studio_component(ui, component, cx, cy, cw, ch, index == project.selected, false)
+        add_hit(ui, "studio_component", cx, cy, cw, ch, { index = index, app_x = app_x, app_y = app_y })
       end
-      if index == project.selected then outline(ui.gpu, cx - 2, cy - 2, cw + 4, ch + 4, COLORS.red) end
+    end
+    if max_scroll_y > 0 then
+      local metrics = scrollbar.metrics(app_h, viewport_h, project.preview_scroll_y, viewport_x + viewport_w - 5, viewport_y + 2, viewport_h - 4)
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(190, 196, 205), thumb = rgb(82, 90, 104) })
+    end
+    if max_scroll_x > 0 then
+      rect(ui.gpu, viewport_x + 2, viewport_y + viewport_h - 5, viewport_w - 4, 3, rgb(190, 196, 205))
+      local thumb_w = math.max(12, math.floor((viewport_w / app_w) * (viewport_w - 4)))
+      local thumb_x = viewport_x + 2 + math.floor((project.preview_scroll_x / math.max(1, max_scroll_x)) * math.max(1, viewport_w - 4 - thumb_w))
+      rect(ui.gpu, thumb_x, viewport_y + viewport_h - 5, thumb_w, 3, rgb(82, 90, 104))
     end
     local status = project.dirty and "Unsaved" or "Saved"
     draw_text(ui.gpu, content_x + content_w - (#status * 6) - 8, content_y + 6, status, COLORS.white, -1)
@@ -1121,7 +1242,9 @@ function M.new(ctx)
       draw_text(ui.gpu, content_x, content_y, "Terminal", COLORS.white, -1)
       draw_text(ui.gpu, content_x, content_y + 14, "Use dock commands from CraftOS.", COLORS.white, -1)
     else
-      draw_text(ui.gpu, content_x, content_y, window.app.manifest.name, COLORS.white, -1)
+      if not draw_generated_app(ui, window, x, y, w, h) then
+        draw_text(ui.gpu, content_x, content_y, window.app.manifest.name, COLORS.white, -1)
+      end
     end
   end
 
@@ -1140,7 +1263,7 @@ function M.new(ctx)
     draw_about(ui)
     if ctx.cursor_service then
       local hover = hit_at(ui, ui.cursor.x, ui.cursor.y)
-      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text)
+      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text or ui.dragging_studio)
       ctx.cursor_service.draw(ui.gpu, kind, ui.frame)
     end
     if ui.gpu.sync then pcall(ui.gpu.sync) end
@@ -1150,15 +1273,29 @@ function M.new(ctx)
     set_pinned(ui, app_id, not is_pinned(ui, app_id))
   end
 
-  local function focus_window(ui, id)
+  function focus_window(ui, id)
     local focused = ctx.window_service.focus(id)
     sync_windows(ui)
     return focused.ok and focused.data or nil
   end
 
   local function close_window(ui, id)
+    local closed_app_id, app_type
+    for _, window in ipairs(ui.windows or {}) do
+      if window.id == id then
+        closed_app_id = window.app_id
+        app_type = window.app and window.app.manifest and window.app.manifest.type
+      end
+    end
     ctx.window_service.close(id)
     sync_windows(ui)
+    local still_open = false
+    for _, window in ipairs(ui.windows or {}) do
+      if window.app_id == closed_app_id and not window.minimized then still_open = true end
+    end
+    if closed_app_id and app_type ~= "system" and not still_open and ctx.app_runtime_service and ctx.app_runtime_service.stopApp then
+      ctx.app_runtime_service.stopApp(closed_app_id)
+    end
   end
 
   local function finish_text_input(ui, commit)
@@ -1199,7 +1336,7 @@ function M.new(ctx)
       end
     elseif hit.id == "dock_keep" then pin_app(ui, hit.payload); ui.context = nil
     elseif hit.id == "explorer_sidebar" then ctx.explorer_service.navigate(hit.payload.window_id, hit.payload.path)
-    elseif hit.id == "explorer_row" then ctx.explorer_service.select(hit.payload.window_id, hit.payload.path)
+    elseif hit.id == "explorer_row" then ctx.explorer_service.select(hit.payload.window_id, hit.payload.path); sync_windows(ui)
     elseif hit.id == "explorer_search" then
       local window_id = hit.payload.window_id
       local state = ctx.explorer_service.state(window_id).data
@@ -1242,8 +1379,24 @@ function M.new(ctx)
     elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
     elseif hit.id == "studio_new" then ctx.studio_service.newProject()
     elseif hit.id == "studio_save" then ctx.studio_service.save()
-    elseif hit.id == "studio_export" then ctx.studio_service.exportApp()
+    elseif hit.id == "studio_export" then ctx.studio_service.exportApp(); ctx.app_service.scanApps()
+    elseif hit.id == "studio_run" then
+      local exported = ctx.studio_service.exportApp()
+      if exported.ok then
+        ctx.app_service.scanApps()
+        local project = ctx.studio_service.current().data
+        open_window(ui, project.id)
+      end
+    elseif hit.id == "studio_example" then ctx.studio_service.loadExample(hit.payload)
+    elseif hit.id == "studio_icon" then ctx.studio_service.cycleIcon()
     elseif hit.id == "studio_insert" then ctx.studio_service.addComponent(hit.payload)
+    elseif hit.id == "studio_component" then
+      ctx.studio_service.selectComponent(hit.payload.index)
+      ui.dragging_studio = { index = hit.payload.index, dx = x - (hit.payload.app_x + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).x or 0)), dy = y - (hit.payload.app_y + 22 + ((ctx.studio_service.current().data.components[hit.payload.index] or {}).y or 0)), app_x = hit.payload.app_x, app_y = hit.payload.app_y }
+    elseif hit.id == "app_component_button" then
+      if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch("dock_app_event", hit.payload) end
+      local runtime = ctx.app_runtime_service and ctx.app_runtime_service.stateForApp and ctx.app_runtime_service.stateForApp(hit.payload.app_id).data
+      if ctx.notification_service and (not runtime or not runtime.running) then ctx.notification_service.add("DockOS", hit.payload.message or "Button pressed", hit.payload.app_id) end
     elseif hit.id == "window_close" then close_window(ui, hit.payload)
     elseif hit.id == "window_min" then ctx.window_service.minimize(hit.payload, true); sync_windows(ui)
     elseif hit.id == "window_full" then ctx.window_service.toggleFullscreen(hit.payload); sync_windows(ui)
@@ -1336,7 +1489,12 @@ function M.new(ctx)
   local function needs_animation(ui)
     local update = ctx.update_service and ctx.update_service.status().data
     local update_status = update and update.status or "idle"
-    return ui.text_input ~= nil or update_status == "checking" or update_status == "installing"
+    if ui.text_input ~= nil or update_status == "checking" or update_status == "installing" then return true end
+    for _, app in ipairs(ctx.app_service.listApps().data or {}) do
+      local state = dock_state_for_app(ui, app.manifest.id)
+      if state.loading or state.notify then return true end
+    end
+    return false
   end
 
   local function run_graphical(gpu, width, height)
@@ -1364,6 +1522,8 @@ function M.new(ctx)
           if ui.dragging_text then
             ctx.text_input_service.cursorFromX(ui.dragging_text.input_id, x, ui.dragging_text.text_x, 6, true)
             sync_text_input(ui)
+          elseif ui.dragging_studio then
+            ctx.studio_service.moveComponent(ui.dragging_studio.index, x - ui.dragging_studio.app_x - ui.dragging_studio.dx, y - ui.dragging_studio.app_y - 22 - ui.dragging_studio.dy)
           elseif ui.dragging_window then
             for _, window in ipairs(ui.windows) do
               if window.id == ui.dragging_window.id then
@@ -1387,11 +1547,15 @@ function M.new(ctx)
           ui.dragging_dock = nil
           if ui.dragging_window then ctx.window_service.save() end
           ui.dragging_window = nil
+          ui.dragging_studio = nil
           ui.dragging_text = nil
           ui.selecting = nil
         elseif mapped == "mouse_scroll" then
           local window = active_window(ui)
           if window and window.app_id == "dock.settings" then settings_scroll(ui, button) end
+          if window and window.app_id == "dock.studio" then
+            if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
+          end
         elseif mapped == "peripheral" or mapped == "peripheral_detach" then
           ctx.device_service.scan()
         end

@@ -63,5 +63,11 @@ for index, file in ipairs(FILES) do
   local ok, err = download(source, file)
   if not ok then print("Install failed: " .. tostring(err)); return end
 end
+if not fs.exists("dock/etc") then fs.makeDir("dock/etc") end
+local system_config = fs.open("dock/etc/system.json", "w")
+if system_config then
+  system_config.write('{"channel":"dev","theme":"paralimni","update_source":"' .. DEFAULT_SOURCE_URL .. '"}')
+  system_config.close()
+end
 print("DockOS Paralimni installed")
 print("Run: dock")

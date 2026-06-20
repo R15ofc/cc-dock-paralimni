@@ -63,6 +63,8 @@ return {
     check("permission grant", granted.ok and ctx.permission_service.check("selftest.app", "ipc.message").data == true)
     local runtime = ctx.app_runtime_service.launch("dock.files", {})
     check("app runtime", runtime.ok and runtime.data.pid ~= nil and runtime.data.app_id == "dock.files")
+    local notified = ctx.notification_service.add("Selftest", "Body", "selftest.app")
+    check("notification app state", notified.ok and ctx.notification_service.recentForApp("selftest.app", 5).data ~= nil)
     local explorer_root = paths.join(paths.userFolder("default", "Documents"), "ExplorerSelftest")
     if fs.exists(explorer_root) then fs.delete(explorer_root) end
     ctx.fs_service.createDirectory(explorer_root)
@@ -114,8 +116,19 @@ return {
     check("menu service", menu_set.ok and ctx.menu_service.menuFor("selftest.app").data[1].label == "Build")
     local studio_new = ctx.studio_service.newProject("Selftest Studio App")
     local studio_add = ctx.studio_service.addComponent("input")
+    local studio_move = ctx.studio_service.moveComponent(1, 30, 30)
+    local studio_source = ctx.studio_service.sourceCode()
+    local studio_icon = ctx.studio_service.setIcon("placeholder")
+    local studio_example = ctx.studio_service.loadExample("notify")
     local studio_export = ctx.studio_service.exportApp()
-    check("studio service", studio_new.ok and studio_add.ok and studio_export.ok and fs.exists(studio_export.data.manifest))
+    check("studio service", studio_new.ok and studio_add.ok and studio_move.ok and studio_source.ok and studio_icon.ok and studio_example.ok and studio_export.ok and fs.exists(studio_export.data.manifest) and fs.exists(studio_export.data.ui) and studio_export.data.path:match("%.app$") ~= nil)
+    ctx.app_service.scanApps()
+    local studio_app_id = ctx.studio_service.current().data.id
+    check("app bundle registry", ctx.app_service.getApp(studio_app_id).ok)
+    local studio_runtime = ctx.app_runtime_service.launch(studio_app_id, {})
+    if studio_runtime.ok then ctx.process_manager.dispatch("dock_app_event", { app_id = studio_app_id, kind = "button", action = "notify", message = "Selftest event" }) end
+    check("app bundle runtime", studio_runtime.ok and ctx.notification_service.recentForApp(studio_app_id, 5).data ~= nil)
+    ctx.app_runtime_service.stopApp(studio_app_id)
 
     local passed = 0
     for _, item in ipairs(checks) do

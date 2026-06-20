@@ -47,6 +47,9 @@ function M.new(ctx)
 
   local function configured_source()
     local stored = ctx.settings_service and ctx.settings_service.get("system.update_source", DEFAULT_SOURCE_URL).data or DEFAULT_SOURCE_URL
+    if tostring(stored or ""):find("raw.githubusercontent.com/R15ofc/cc%-dock%-paralimni/", 1, false) then
+      stored = DEFAULT_SOURCE_URL
+    end
     return normalize_source(stored)
   end
 
@@ -84,9 +87,10 @@ function M.new(ctx)
     local source = configured_source()
     local remote, request_error = read_remote_version(source)
     if not remote then
-      service.state.status = "no_updates"
+      service.state.status = "error"
       service.state.error = request_error
       service.state.available = nil
+      service.state.source = source
       return ok(service.state)
     end
     local newer = remote.codename ~= version.codename or compare_versions(remote.version, version.version) > 0
@@ -118,6 +122,13 @@ function M.new(ctx)
   end
 
   function service.status()
+    return ok(service.state)
+  end
+
+  function service.setSource(source)
+    source = normalize_source(source)
+    if ctx.settings_service then ctx.settings_service.set("system.update_source", source) end
+    service.state.source = source
     return ok(service.state)
   end
 
