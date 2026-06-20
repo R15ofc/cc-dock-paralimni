@@ -34,6 +34,12 @@ local function sorted_keys(map)
   return out
 end
 
+local function list_copy(list)
+  local out = {}
+  for _, item in ipairs(list or {}) do table.insert(out, tostring(item)) end
+  return out
+end
+
 function M.new(ctx)
   local service = {
     ctx = ctx,
@@ -79,12 +85,12 @@ function M.new(ctx)
     local app_id = manifest.id
     service.grants[app_id] = service.grants[app_id] or { granted = {}, denied = {}, requested = {} }
     local record = service.grants[app_id]
-    record.requested = manifest.permissions or {}
+    record.requested = list_copy(manifest.permissions)
     if manifest.type == "system" then
-      record.granted = manifest.permissions or {}
+      record.granted = list_copy(manifest.permissions)
       record.trusted = true
     else
-      record.granted = record.granted or {}
+      record.granted = list_copy(record.granted)
       record.trusted = record.trusted == true
     end
     service.save()

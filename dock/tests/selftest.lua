@@ -1,4 +1,5 @@
 local paths = require("dock.system.paths")
+local json = require("dock.system.json")
 
 return {
   run = function(ctx)
@@ -53,6 +54,8 @@ return {
     check("ipc service", sent and sent.ok and ctx.ipc_service.receive(receiver.data.pid).data.kind == "ping")
     local permission = ctx.permission_service.check("dock.files", "fs.read")
     check("permission service", permission.ok and permission.data == true and not ctx.permission_service.validateManifest({ id = "bad", permissions = { "unknown.permission" } }).ok)
+    local repeated = { "fs.read" }
+    check("json repeated table", type(json.encode({ requested = repeated, granted = repeated })) == "string")
     local granted = ctx.permission_service.grant("selftest.app", "ipc.message")
     check("permission grant", granted.ok and ctx.permission_service.check("selftest.app", "ipc.message").data == true)
     local runtime = ctx.app_runtime_service.launch("dock.files", {})
