@@ -1,5 +1,6 @@
 local paths = require("dock.system.paths")
 local json = require("dock.system.json")
+local loading = require("dock.system.loading")
 
 return {
   run = function(ctx)
@@ -70,6 +71,11 @@ return {
     local listed = ctx.explorer_service.list(explorer_id)
     check("explorer create/list", folder.ok and file.ok and listed.ok and #listed.data.rows >= 2)
     ctx.explorer_service.select(explorer_id, file.data)
+    ctx.explorer_service.startRename(explorer_id)
+    ctx.explorer_service.setRenameText(explorer_id, "renamed/illegal:name.txt")
+    local renamed = ctx.explorer_service.commitRename(explorer_id)
+    check("explorer rename keeps extension", renamed.ok and fs.getName(renamed.data) == "renamedillegalname.txt")
+    file = renamed
     local copied = ctx.explorer_service.copySelected(explorer_id)
     local pasted = ctx.explorer_service.paste(explorer_id)
     check("explorer copy/paste", copied.ok and pasted.ok and fs.exists(pasted.data))
@@ -84,6 +90,8 @@ return {
     local trashed = ctx.explorer_service.trashSelected(explorer_id)
     local restored_explorer = trashed.ok and ctx.fs_service.restoreFromTrash(trashed.data.id)
     check("explorer trash/restore", restored_explorer and restored_explorer.ok and fs.exists(moved.data))
+    check("loading helper", loading.spinner(0) == "|" and loading.progress(50, 4):match("^##%-%-") ~= nil)
+    check("update service", ctx.update_service.status().ok and ctx.update_service.beginCheck().ok)
 
     local passed = 0
     for _, item in ipairs(checks) do

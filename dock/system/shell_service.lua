@@ -1,5 +1,6 @@
 local paths = require("dock.system.paths")
 local tom = require("dock.system.tom_adapter")
+local loading = require("dock.system.loading")
 
 local M = {}
 local unpacker = table.unpack or unpack
@@ -221,7 +222,8 @@ function M.new(ctx)
     safe_print("dock runtime | stop <instance_or_pid>")
     safe_print("dock permissions <app_id> | grant <app_id> <permission> | revoke <app_id> <permission>")
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
-    safe_print("dock explorer [go|back|up|search|select|new-folder|new-file|copy|cut|paste|trash]")
+    safe_print("dock explorer [go|back|up|search|select|rename|new-folder|new-file|copy|cut|paste|trash]")
+    safe_print("dock update [check|status|install]")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
     safe_print("dock trash <path> | restore <trash_id> | search <query>")
@@ -295,6 +297,7 @@ function M.new(ctx)
       elseif action == "up" then result = ctx.explorer_service.up(id)
       elseif action == "search" then result = ctx.explorer_service.setSearch(id, join_words(args, 3))
       elseif action == "select" then result = ctx.explorer_service.select(id, join_words(args, 3))
+      elseif action == "rename" then result = ctx.explorer_service.renameSelected(id, join_words(args, 3))
       elseif action == "new-folder" then result = ctx.explorer_service.createFolder(id, join_words(args, 3) ~= "" and join_words(args, 3) or nil)
       elseif action == "new-file" then result = ctx.explorer_service.createFile(id, join_words(args, 3) ~= "" and join_words(args, 3) or nil)
       elseif action == "copy" then result = ctx.explorer_service.copySelected(id)
@@ -306,6 +309,16 @@ function M.new(ctx)
       local listed = ctx.explorer_service.list(id)
       safe_print("Explorer: " .. listed.data.state.path)
       for _, row in ipairs(listed.data.rows or {}) do safe_print((row.dir and "[D] " or "[F] ") .. row.name) end
+      return result
+    elseif command == "update" then
+      local action = args[2] or "status"
+      local result
+      if action == "check" then result = ctx.update_service.beginCheck(); result = ctx.update_service.checkNow()
+      elseif action == "install" then result = ctx.update_service.installAvailable()
+      else result = ctx.update_service.status() end
+      if not result.ok then return print_result(result) end
+      safe_print("Update: " .. tostring(result.data.status))
+      if result.data.available then safe_print(result.data.available.title) end
       return result
     elseif command == "ps" then
       for _, item in ipairs(ctx.process_manager.list().data) do safe_print(tostring(item.pid) .. " " .. item.status .. " " .. item.name) end
@@ -397,6 +410,8 @@ function M.new(ctx)
       dragging_window = nil,
       dock_metrics = nil,
       text_input = nil,
+      settings = { section = "general" },
+      frame = 0,
     }
   end
 
@@ -469,14 +484,21 @@ function M.new(ctx)
     local geometry = { x = 42, y = 24, w = math.min(220, ui.width - 70), h = math.min(120, ui.height - 58) }
     if app_id == "dock.files" then
       geometry = { x = 24, y = 20, w = math.min(330, ui.width - 38), h = math.min(138, ui.height - 58) }
+    elseif app_id == "dock.settings" then
+      geometry = { x = 32, y = 20, w = math.min(290, ui.width - 54), h = math.min(136, ui.height - 58) }
     end
     ctx.window_service.open(app_id, geometry)
     sync_windows(ui)
   end
 
-  local function active_app_id(ui)
-    for _, window in ipairs(ui.windows) do if window.id == ui.active and not window.minimized then return window.app_id end end
+  local function active_window(ui)
+    for _, window in ipairs(ui.windows) do if window.id == ui.active and not window.minimized then return window end end
     return nil
+  end
+
+  local function active_app_id(ui)
+    local window = active_window(ui)
+    return window and window.app_id or nil
   end
 
   local function dock_apps(ui)
@@ -650,10 +672,32 @@ function M.new(ctx)
       local row_y = list_y + ((index - start_index) * row_h)
       if row.selected then rect(ui.gpu, main_x + 3, row_y - 2, main_w - 6, row_h, rgb(0, 92, 180)) end
       draw_file_icon(ui.gpu, main_x + 8, row_y - 2, row.dir, row.selected)
-      draw_text(ui.gpu, main_x + 23, row_y, ellipsize(row.name, math.floor((main_w - 80) / 6)), COLORS.white, -1)
+      local renaming = data.rename and data.rename.path == row.path
+      local name_x = main_x + 23
+      if renaming then
+        local extension = data.rename.extension or ""
+        local extension_w = extension ~= "" and (#extension * 6 + 5) or 0
+        local available_w = math.max(36, main_w - 76 - extension_w)
+        local input_w = math.max(32, math.min(available_w, (#tostring(data.rename.value or "") * 6) + 14))
+        rect(ui.gpu, name_x - 3, row_y - 3, input_w, 11, rgb(236, 241, 247))
+        outline(ui.gpu, name_x - 3, row_y - 3, input_w, 11, COLORS.blue)
+        local cursor = (math.floor((ui.frame or 0) / 4) % 2 == 0) and "_" or ""
+        draw_text(ui.gpu, name_x + 1, row_y, ellipsize(tostring(data.rename.value or "") .. cursor, math.floor((input_w - 7) / 6)), COLORS.black, -1)
+        if extension ~= "" then draw_text(ui.gpu, name_x + input_w + 1, row_y, extension, COLORS.white, -1) end
+        add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, window.id)
+      else
+        draw_text(ui.gpu, name_x, row_y, ellipsize(row.name, math.floor((main_w - 80) / 6)), COLORS.white, -1)
+      end
       local meta = row.dir and "folder" or format_size(row.size)
       draw_text(ui.gpu, main_x + main_w - 45, row_y, meta, COLORS.white, -1)
       add_hit(ui, "explorer_row", main_x + 3, row_y - 3, main_w - 6, row_h, { window_id = window.id, path = row.path })
+      if renaming then
+        local extension = data.rename.extension or ""
+        local extension_w = extension ~= "" and (#extension * 6 + 5) or 0
+        local available_w = math.max(36, main_w - 76 - extension_w)
+        local input_w = math.max(32, math.min(available_w, (#tostring(data.rename.value or "") * 6) + 14))
+        add_hit(ui, "explorer_rename", name_x - 4, row_y - 4, input_w + extension_w + 4, 13, window.id)
+      end
     end
     if #data.rows > visible_rows then
       small_round(ui.gpu, main_x + main_w - 13, list_y - 1, 9, 9, rgb(48, 54, 63))
@@ -679,6 +723,71 @@ function M.new(ctx)
     end
   end
 
+  local function draw_settings(ui, window, x, y, w, h)
+    local content_x, content_y = x + 6, y + 21
+    local content_w, content_h = w - 12, h - 28
+    local sidebar_w = 76
+    local main_x = content_x + sidebar_w + 5
+    local main_w = content_w - sidebar_w - 5
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(25, 27, 31))
+    rect(ui.gpu, content_x, content_y, sidebar_w, content_h, rgb(34, 37, 43))
+    rect(ui.gpu, main_x, content_y, main_w, content_h, rgb(238, 241, 245))
+
+    local section = ui.settings and ui.settings.section or "general"
+    local tabs = {
+      { id = "general", label = "General" },
+      { id = "appearance", label = "Appearance" },
+    }
+    local tab_y = content_y + 10
+    for _, tab in ipairs(tabs) do
+      local selected = section == tab.id
+      if selected then small_round(ui.gpu, content_x + 6, tab_y - 4, sidebar_w - 12, 14, rgb(60, 70, 84)) end
+      draw_text(ui.gpu, content_x + 14, tab_y, tab.label, COLORS.white, -1)
+      add_hit(ui, "settings_nav", content_x + 5, tab_y - 5, sidebar_w - 10, 16, tab.id)
+      tab_y = tab_y + 18
+    end
+
+    if section == "appearance" then
+      draw_text(ui.gpu, main_x + 10, content_y + 10, "Appearance", COLORS.black, -1)
+      local themes = { "Blue", "Red", "Green", "White", "Dark" }
+      local y_pos = content_y + 31
+      for _, theme in ipairs(themes) do
+        small_round(ui.gpu, main_x + 10, y_pos - 4, 54, 14, rgb(215, 221, 230))
+        draw_text(ui.gpu, main_x + 20, y_pos, theme, COLORS.black, -1)
+        add_hit(ui, "settings_theme", main_x + 10, y_pos - 4, 54, 14, theme:lower())
+        y_pos = y_pos + 18
+      end
+      return
+    end
+
+    local update = ctx.update_service.poll().data
+    draw_text(ui.gpu, main_x + 10, content_y + 10, "General", COLORS.black, -1)
+    draw_text(ui.gpu, main_x + 10, content_y + 25, "Software Update", COLORS.black, -1)
+    draw_text(ui.gpu, main_x + 10, content_y + 39, "DockOS " .. ctx.version.codename .. " " .. ctx.version.version, rgb(88, 92, 98), -1)
+
+    local card_x, card_y = main_x + 10, content_y + 57
+    local card_w, card_h = main_w - 20, math.max(42, content_h - 67)
+    small_round(ui.gpu, card_x, card_y, card_w, card_h, rgb(250, 250, 252))
+    outline(ui.gpu, card_x, card_y, card_w, card_h, rgb(205, 211, 220))
+
+    if update.status == "checking" then
+      draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Fetching Updates", ui.frame), rgb(116, 121, 128), -1)
+    elseif update.status == "available" and update.available then
+      draw_text(ui.gpu, card_x + 12, card_y + 9, ellipsize(update.available.title, math.floor((card_w - 24) / 6)), COLORS.black, -1)
+      draw_text(ui.gpu, card_x + 12, card_y + 23, ellipsize(update.available.changelog, math.floor((card_w - 24) / 6)), rgb(84, 88, 94), -1)
+      draw_text(ui.gpu, card_x + 12, card_y + 37, "Install time: " .. update.available.eta, rgb(84, 88, 94), -1)
+      small_round(ui.gpu, card_x + card_w - 62, card_y + card_h - 19, 50, 14, COLORS.blue)
+      draw_text(ui.gpu, card_x + card_w - 51, card_y + card_h - 15, "Update", COLORS.white, -1)
+      add_hit(ui, "settings_update_install", card_x + card_w - 62, card_y + card_h - 19, 50, 14)
+    elseif update.status == "installing" then
+      draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Installing Update", ui.frame), rgb(116, 121, 128), -1)
+    elseif update.status == "installed" then
+      draw_text(ui.gpu, card_x + 12, card_y + 14, "Update installed. Reboot required.", rgb(60, 64, 70), -1)
+    else
+      draw_text(ui.gpu, card_x + 12, card_y + 14, "No updates", rgb(116, 121, 128), -1)
+    end
+  end
+
   local function draw_window(ui, window)
     if window.minimized then return end
     local x, y, w, h = window.x, window.y, window.w, window.h
@@ -698,9 +807,7 @@ function M.new(ctx)
     if app_id == "dock.files" then
       draw_explorer(ui, window, x, y, w, h)
     elseif app_id == "dock.settings" then
-      draw_text(ui.gpu, content_x, content_y, "DockOS Paralimni 0.0.1", COLORS.white, -1)
-      draw_text(ui.gpu, content_x, content_y + 14, "User: " .. ctx.user_service.getCurrentUser().name, COLORS.white, -1)
-      draw_text(ui.gpu, content_x, content_y + 28, "Type: " .. terminal_type(), COLORS.white, -1)
+      draw_settings(ui, window, x, y, w, h)
     elseif app_id == "dock.terminal" then
       draw_text(ui.gpu, content_x, content_y, "Terminal", COLORS.white, -1)
       draw_text(ui.gpu, content_x, content_y + 14, "Use dock commands from CraftOS.", COLORS.white, -1)
@@ -710,6 +817,7 @@ function M.new(ctx)
   end
 
   local function render(ui)
+    ui.frame = (ui.frame or 0) + 1
     ui.hits = {}
     draw_wallpaper(ui)
     draw_top(ui)
@@ -737,14 +845,27 @@ function M.new(ctx)
     sync_windows(ui)
   end
 
+  local function finish_text_input(ui, commit)
+    if not ui.text_input then return end
+    local input = ui.text_input
+    if input.kind == "explorer_rename" then
+      if commit then ctx.explorer_service.commitRename(input.window_id) else ctx.explorer_service.cancelRename(input.window_id) end
+    end
+    ui.text_input = nil
+  end
+
   local function handle_action(ui, hit, button, x, y)
     if not hit then
       ui.menu, ui.context = false, nil
-      ui.text_input = nil
+      finish_text_input(ui, true)
       if button == 1 then ui.selecting = { x1 = x, y1 = y, x2 = x, y2 = y } end
       return
     end
-    if hit.id ~= "explorer_search" then ui.text_input = nil end
+    if ui.text_input and ui.text_input.kind == "explorer_rename" and hit.id ~= "explorer_rename" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "explorer_search" and hit.id ~= "explorer_search" then
+      finish_text_input(ui, true)
+    end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
     elseif hit.id == "about" then ui.about = true; ui.menu = false
     elseif hit.id == "about_close" then ui.about = false
@@ -761,6 +882,7 @@ function M.new(ctx)
     elseif hit.id == "explorer_sidebar" then ctx.explorer_service.navigate(hit.payload.window_id, hit.payload.path)
     elseif hit.id == "explorer_row" then ctx.explorer_service.select(hit.payload.window_id, hit.payload.path)
     elseif hit.id == "explorer_search" then ui.text_input = { kind = "explorer_search", window_id = hit.payload }
+    elseif hit.id == "explorer_rename" then ui.text_input = { kind = "explorer_rename", window_id = hit.payload }
     elseif hit.id == "explorer_back" then ctx.explorer_service.back(hit.payload)
     elseif hit.id == "explorer_forward" then ctx.explorer_service.forward(hit.payload)
     elseif hit.id == "explorer_up" then ctx.explorer_service.up(hit.payload)
@@ -773,6 +895,9 @@ function M.new(ctx)
     elseif hit.id == "explorer_trash" then ctx.explorer_service.trashSelected(hit.payload)
     elseif hit.id == "explorer_scroll_up" then ctx.explorer_service.scroll(hit.payload, -1)
     elseif hit.id == "explorer_scroll_down" then ctx.explorer_service.scroll(hit.payload, 1)
+    elseif hit.id == "settings_nav" then ui.settings.section = hit.payload
+    elseif hit.id == "settings_theme" then ctx.settings_service.set("user.theme", hit.payload)
+    elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
     elseif hit.id == "window_close" then close_window(ui, hit.payload)
     elseif hit.id == "window_min" then ctx.window_service.minimize(hit.payload, true); sync_windows(ui)
     elseif hit.id == "window_full" then ctx.window_service.toggleFullscreen(hit.payload); sync_windows(ui)
@@ -786,27 +911,56 @@ function M.new(ctx)
   end
 
   local function handle_text_input(ui, event, a, b)
-    if not ui.text_input or ui.text_input.kind ~= "explorer_search" then return false end
+    if not ui.text_input then return false end
     local window_id = ui.text_input.window_id
-    if event == "char" then
+    if ui.text_input.kind == "explorer_search" and event == "char" then
       ctx.explorer_service.appendSearch(window_id, a)
       return true
-    elseif event == "paste" then
+    elseif ui.text_input.kind == "explorer_search" and event == "paste" then
       ctx.explorer_service.appendSearch(window_id, a)
       return true
-    elseif event == "tm_keyboard_char" then
+    elseif ui.text_input.kind == "explorer_search" and event == "tm_keyboard_char" then
       ctx.explorer_service.appendSearch(window_id, b or a)
       return true
-    elseif event == "tm_keyboard_paste" then
+    elseif ui.text_input.kind == "explorer_search" and event == "tm_keyboard_paste" then
       ctx.explorer_service.appendSearch(window_id, b or a)
+      return true
+    elseif ui.text_input.kind == "explorer_rename" and event == "char" then
+      ctx.explorer_service.appendRenameText(window_id, a)
+      return true
+    elseif ui.text_input.kind == "explorer_rename" and event == "paste" then
+      ctx.explorer_service.appendRenameText(window_id, a)
+      return true
+    elseif ui.text_input.kind == "explorer_rename" and event == "tm_keyboard_char" then
+      ctx.explorer_service.appendRenameText(window_id, b or a)
+      return true
+    elseif ui.text_input.kind == "explorer_rename" and event == "tm_keyboard_paste" then
+      ctx.explorer_service.appendRenameText(window_id, b or a)
       return true
     elseif event == "key" then
-      if keys and a == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
-      if keys and (a == keys.enter or a == keys.numPadEnter or a == keys.escape) then ui.text_input = nil; return true end
+      if ui.text_input.kind == "explorer_search" and keys and a == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
+      if ui.text_input.kind == "explorer_rename" and keys and a == keys.backspace then ctx.explorer_service.backspaceRenameText(window_id); return true end
+      if keys and (a == keys.enter or a == keys.numPadEnter) then finish_text_input(ui, true); return true end
+      if keys and a == keys.escape then finish_text_input(ui, false); return true end
     elseif event == "tm_keyboard_key" then
       local key = b or a
-      if keys and key == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
-      if keys and (key == keys.enter or key == keys.numPadEnter or key == keys.escape) then ui.text_input = nil; return true end
+      if ui.text_input.kind == "explorer_search" and keys and key == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
+      if ui.text_input.kind == "explorer_rename" and keys and key == keys.backspace then ctx.explorer_service.backspaceRenameText(window_id); return true end
+      if keys and (key == keys.enter or key == keys.numPadEnter) then finish_text_input(ui, true); return true end
+      if keys and key == keys.escape then finish_text_input(ui, false); return true end
+    end
+    return false
+  end
+
+  local function handle_global_key(ui, event, a, b)
+    local key = event == "tm_keyboard_key" and (b or a) or a
+    if not keys or not key then return false end
+    if key == keys.enter or key == keys.numPadEnter then
+      local window = active_window(ui)
+      if window and window.app_id == "dock.files" then
+        local started = ctx.explorer_service.startRename(window.id)
+        if started.ok then ui.text_input = { kind = "explorer_rename", window_id = window.id }; return true end
+      end
     end
     return false
   end
@@ -815,9 +969,11 @@ function M.new(ctx)
     local ui = initial_ui_state(gpu, width, height)
     while true do
       render(ui)
+      if os.startTimer then os.startTimer(0.15) end
       local event, a, b, c, d = os.pullEvent()
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
       if handle_text_input(ui, event, a, b) then
+      elseif not ui.text_input and (event == "key" or event == "tm_keyboard_key") and handle_global_key(ui, event, a, b) then
       elseif event == "rednet_message" then ctx.net_service.handleMessage(a, b, c)
       elseif event == "key" and not ui.text_input and keys and a == keys.q then return { ok = true }
       else

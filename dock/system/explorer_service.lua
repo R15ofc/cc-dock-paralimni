@@ -33,6 +33,36 @@ local function copy_item(ctx, source, target)
   return ctx.safe_io.copyFile(source, target, ctx.safe_io.shouldCopyBinary(source))
 end
 
+local function trim(value)
+  value = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  return value
+end
+
+local function sanitize_name(value)
+  value = trim(value)
+  value = value:gsub("[%z\1-\31]", "")
+  value = value:gsub("[/\\:%*%?\"<>|]", "")
+  value = value:gsub("^%.+$", "")
+  value = value:gsub("%s+", " ")
+  return value
+end
+
+local function split_editable_name(path)
+  local name = fs.getName(path)
+  if fs.isDir(path) then return name, "" end
+  local base, extension = name:match("^(.*)(%.[^%.]+)$")
+  if not base or base == "" then return name, "" end
+  return base, extension
+end
+
+local function safe_rename_target(source, new_name)
+  new_name = sanitize_name(new_name)
+  if new_name == "" then return nil, "empty name" end
+  local target = fs.combine(fs.getDir(source), new_name)
+  if target ~= source and fs.exists(target) then return nil, "name already exists" end
+  return target
+end
+
 function M.new(ctx)
   local service = { ctx = ctx, states = {}, clipboard = nil }
 
@@ -51,6 +81,7 @@ function M.new(ctx)
       view = "list",
       scroll = 0,
       preview = nil,
+      rename = nil,
     }
   end
 
@@ -68,6 +99,7 @@ function M.new(ctx)
     item.path = target
     item.selected = nil
     item.preview = nil
+    item.rename = nil
     item.future = push_history and {} or item.future
     item.scroll = 0
     return ok(item)
@@ -117,7 +149,7 @@ function M.new(ctx)
         preview = item.preview == item.selected,
       }
     end
-    return ok({ state = item, rows = rows, sidebar = service.sidebar().data, clipboard = service.clipboard, selected = selected_meta })
+    return ok({ state = item, rows = rows, sidebar = service.sidebar().data, clipboard = service.clipboard, selected = selected_meta, rename = item.rename })
   end
 
   function service.navigate(id, path)
@@ -158,6 +190,7 @@ function M.new(ctx)
     end
     item.selected = path
     item.preview = nil
+    item.rename = nil
     return ok(item)
   end
 
@@ -167,6 +200,70 @@ function M.new(ctx)
     if fs.isDir(item.selected) then return service.navigate(id, item.selected) end
     item.preview = item.selected
     return ok(item)
+  end
+
+  function service.startRename(id)
+    local item = state(id)
+    if not item.selected or not fs.exists(item.selected) then return err("nothing selected", "NO_SELECTION") end
+    local base, extension = split_editable_name(item.selected)
+    item.rename = {
+      path = item.selected,
+      value = base,
+      extension = extension,
+      original = fs.getName(item.selected),
+      dir = fs.isDir(item.selected),
+    }
+    return ok(item.rename)
+  end
+
+  function service.setRenameText(id, value)
+    local item = state(id)
+    if not item.rename then return err("rename not active", "RENAME_INACTIVE") end
+    item.rename.value = sanitize_name(value)
+    return ok(item.rename)
+  end
+
+  function service.appendRenameText(id, value)
+    local item = state(id)
+    if not item.rename then return err("rename not active", "RENAME_INACTIVE") end
+    item.rename.value = sanitize_name(tostring(item.rename.value or "") .. tostring(value or ""))
+    return ok(item.rename)
+  end
+
+  function service.backspaceRenameText(id)
+    local item = state(id)
+    if not item.rename then return err("rename not active", "RENAME_INACTIVE") end
+    local value = tostring(item.rename.value or "")
+    item.rename.value = value:sub(1, math.max(0, #value - 1))
+    return ok(item.rename)
+  end
+
+  function service.cancelRename(id)
+    local item = state(id)
+    item.rename = nil
+    return ok(item)
+  end
+
+  function service.commitRename(id)
+    local item = state(id)
+    if not item.rename then return err("rename not active", "RENAME_INACTIVE") end
+    if not fs.exists(item.rename.path) then item.rename = nil; return err("path not found", "NOT_FOUND") end
+    local value = sanitize_name(item.rename.value)
+    local extension = item.rename.extension or ""
+    if extension ~= "" and value:sub(-#extension):lower() == extension:lower() then
+      value = sanitize_name(value:sub(1, #value - #extension))
+    end
+    if value == "" then value = item.rename.dir and "Untitled Folder" or "Untitled" end
+    local new_name = value .. extension
+    local target, rename_error = safe_rename_target(item.rename.path, new_name)
+    if not target then return err(rename_error, "INVALID_NAME") end
+    if target == item.rename.path then item.rename = nil; return ok(item.selected) end
+    local renamed = ctx.fs_service.move(item.rename.path, target)
+    if renamed.ok then
+      item.selected = renamed.data
+      item.rename = nil
+    end
+    return renamed
   end
 
   function service.setSearch(id, value)
@@ -217,7 +314,7 @@ function M.new(ctx)
     local item = state(id)
     if not item.selected then return err("nothing selected", "NO_SELECTION") end
     local moved = ctx.fs_service.moveToTrash(item.selected)
-    if moved.ok then item.selected = nil end
+    if moved.ok then item.selected = nil; item.rename = nil end
     return moved
   end
 
@@ -252,8 +349,11 @@ function M.new(ctx)
   function service.renameSelected(id, name)
     local item = state(id)
     if not item.selected then return err("nothing selected", "NO_SELECTION") end
-    local renamed = ctx.fs_service.rename(item.selected, name or fs.getName(item.selected))
-    if renamed.ok then item.selected = renamed.data end
+    local target, rename_error = safe_rename_target(item.selected, name or fs.getName(item.selected))
+    if not target then return err(rename_error, "INVALID_NAME") end
+    if target == item.selected then return ok(item.selected) end
+    local renamed = ctx.fs_service.move(item.selected, target)
+    if renamed.ok then item.selected = renamed.data; item.rename = nil end
     return renamed
   end
 
