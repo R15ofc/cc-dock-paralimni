@@ -1,7 +1,7 @@
 {
   "id": "dock.terminal",
   "name": "Terminal",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "entry": "main.lua",
   "type": "system",
   "category": "system",

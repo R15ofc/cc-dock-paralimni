@@ -829,6 +829,7 @@ function M.new(ctx)
     local labels = {
       general = "General",
       software_update = "Software Update",
+      devices = "Devices",
       accessibility = "Accessibility",
       appearance = "Appearance",
       privacy_security = "Privacy & Security",
@@ -942,13 +943,15 @@ function M.new(ctx)
 
   local function draw_menu(ui)
     if not ui.menu then return end
-    outline(ui.gpu, 2, 10, 92, 44, COLORS.white)
+    outline(ui.gpu, 2, 10, 100, 56, COLORS.white)
     draw_text(ui.gpu, 8, 16, "About DockOS", COLORS.white, -1)
-    draw_text(ui.gpu, 8, 28, "Reboot", COLORS.white, -1)
-    draw_text(ui.gpu, 8, 40, "Shutdown", COLORS.white, -1)
-    add_hit(ui, "about", 4, 12, 88, 12)
-    add_hit(ui, "reboot", 4, 24, 88, 12)
-    add_hit(ui, "shutdown", 4, 36, 88, 12)
+    draw_text(ui.gpu, 8, 28, "Lock Screen", COLORS.white, -1)
+    draw_text(ui.gpu, 8, 40, "Reboot", COLORS.white, -1)
+    draw_text(ui.gpu, 8, 52, "Shutdown", COLORS.white, -1)
+    add_hit(ui, "about", 4, 12, 96, 12)
+    add_hit(ui, "lock_screen", 4, 24, 96, 12)
+    add_hit(ui, "reboot", 4, 36, 96, 12)
+    add_hit(ui, "shutdown", 4, 48, 96, 12)
   end
 
   local function draw_about(ui)
@@ -1263,7 +1266,7 @@ function M.new(ctx)
     }
     local tab_y = content_y + 10
     for _, tab in ipairs(sections) do
-      local selected = route == tab.id or (tab.id == "general" and (route == "software_update" or route == "about" or route == "storage"))
+      local selected = route == tab.id or (tab.id == "general" and (route == "software_update" or route == "about" or route == "storage" or route == "devices"))
       if selected then small_round(ui.gpu, rail_x + 6, tab_y - 4, rail_w - 12, 14, rgb(70, 78, 92)) end
       draw_text(ui.gpu, rail_x + 14, tab_y, ellipsize(tab.label, math.floor((rail_w - 20) / 6)), COLORS.white, -1)
       add_hit(ui, "settings_nav", rail_x + 5, tab_y - 5, rail_w - 10, 16, tab.id)
@@ -1276,7 +1279,8 @@ function M.new(ctx)
       draw_text(ui.gpu, body_x, body_y, "Categories", rgb(84, 88, 94), -1)
       draw_settings_button(ui, "settings_sub", body_x, body_y + 15, body_w, 17, "About This Computer", "about", rgb(250, 250, 252))
       draw_settings_button(ui, "settings_sub", body_x, body_y + 36, body_w, 17, "Storage", "storage", rgb(250, 250, 252))
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 57, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 57, body_w, 17, "Devices", "devices", rgb(250, 250, 252))
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 78, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
       return
     elseif route == "appearance" then
       local themes = { "Blue", "Red", "Green", "White", "Dark" }
@@ -1404,6 +1408,40 @@ function M.new(ctx)
       local metrics = scrollbar.metrics(#rows, visible, scroll, body_x + body_w - 5, body_y, math.max(14, visible * row_h - 3))
       scrollbar.draw(ui.gpu, metrics, { track = rgb(220, 224, 230), thumb = rgb(110, 118, 128) })
       if metrics.enabled then add_hit(ui, "settings_scrollbar", metrics.x - 3, metrics.y, 10, metrics.h, { route = "storage", metrics = metrics }) end
+    elseif route == "devices" then
+      ctx.device_service.scan()
+      local capabilities = ctx.device_service.getCapabilities().data or {}
+      local rows = {
+        { label = "Bitmap Display", value = capabilities["display.bitmap"] and "Available" or "Unavailable" },
+        { label = "Color Display", value = capabilities["display.color"] and "Available" or "Unavailable" },
+        { label = "Keyboard", value = capabilities["input.keyboard"] and "Available" or "Unavailable" },
+        { label = "Mouse", value = capabilities["input.mouse"] and "Available" or "Unavailable" },
+        { label = "Rednet", value = capabilities["network.rednet"] and "Available" or "Unavailable" },
+        { label = "Watchdog", value = capabilities.watchdog and "Available" or "Unavailable" },
+      }
+      local devices = ctx.device_service.listPeripherals().data or {}
+      if #devices == 0 then
+        table.insert(rows, { label = "Peripherals", value = "None" })
+      else
+        for _, device in ipairs(devices) do
+          table.insert(rows, { label = tostring(device.name), value = tostring(device.type or "unknown") })
+        end
+      end
+      local row_h = 16
+      local visible = math.max(1, math.floor((content_y + content_h - body_y - 6) / row_h))
+      local max_scroll = math.max(0, #rows - visible)
+      local scroll = math.min(math.max(0, tonumber(settings.scroll.devices) or 0), max_scroll)
+      settings.scroll.devices = scroll
+      for index = 1, math.min(visible, #rows) do
+        local item = rows[index + scroll]
+        local row_y = body_y + ((index - 1) * row_h)
+        draw_settings_card(ui, body_x, row_y, body_w - 8, 13)
+        draw_text(ui.gpu, body_x + 8, row_y + 4, ellipsize(item.label, math.floor((body_w - 86) / CELL_W)), rgb(84, 88, 94), -1)
+        draw_text(ui.gpu, body_x + math.max(80, math.floor(body_w * 0.52)), row_y + 4, ellipsize(item.value, math.floor((body_w * 0.44) / CELL_W)), COLORS.black, -1)
+      end
+      local metrics = scrollbar.metrics(#rows, visible, scroll, body_x + body_w - 5, body_y, math.max(14, visible * row_h - 3))
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(220, 224, 230), thumb = rgb(110, 118, 128) })
+      if metrics.enabled then add_hit(ui, "settings_scrollbar", metrics.x - 3, metrics.y, 10, metrics.h, { route = "devices", metrics = metrics }) end
     elseif route == "accessibility" then
       local options = {
         { label = "Text Size", value = tostring(ctx.settings_service.get("user.accessibility.text_size", "Normal").data) },
@@ -1972,6 +2010,16 @@ function M.new(ctx)
       if hit.payload and hit.payload.action == "system" then ui.menu = not ui.menu; ui.context = nil else ctx.menu_service.dispatch(hit.payload and hit.payload.app_id, hit.payload and hit.payload.action, {}) end
     elseif hit.id == "about" then ui.about = true; ui.menu = false
     elseif hit.id == "about_close" then ui.about = false
+    elseif hit.id == "lock_screen" then
+      ui.menu = false
+      if ctx.user_service.hasPassword().data then
+        ui.locked = true
+        ui.login = { password = "", message = "", active = true }
+        ui.frame = 0
+      else
+        open_window(ui, "dock.settings")
+        settings_go(ui, "privacy_security")
+      end
     elseif hit.id == "reboot" then os.reboot()
     elseif hit.id == "shutdown" then os.shutdown()
     elseif hit.id == "dock_app" then

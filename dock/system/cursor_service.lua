@@ -15,7 +15,7 @@ function M.new()
   }
 
   local clickable = {
-    system_menu = true, about = true, about_close = true, reboot = true, shutdown = true,
+    system_menu = true, about = true, about_close = true, lock_screen = true, reboot = true, shutdown = true,
     dock_app = true, dock_keep = true,
     explorer_sidebar = true, explorer_row = true, explorer_search = true, explorer_rename = true,
     explorer_back = true, explorer_forward = true, explorer_up = true, explorer_refresh = true,
