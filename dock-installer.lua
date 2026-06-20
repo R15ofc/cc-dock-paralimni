@@ -16,7 +16,14 @@ local FILES = {
   "dock/assets/wallpaper-380x192.png",
   "dock/assets/wallpaper-382x192.png",
   "dock/assets/wallpaper-384x192.png",
-  "dock/assets/wallpaper-512x256.png"
+  "dock/assets/wallpaper-512x256.png",
+  "dock/assets/dock-glass-128x64.png",
+  "dock/assets/dock-glass-256x96.png",
+  "dock/assets/dock-glass-256x128.png",
+  "dock/assets/dock-glass-380x192.png",
+  "dock/assets/dock-glass-382x192.png",
+  "dock/assets/dock-glass-384x192.png",
+  "dock/assets/dock-glass-512x256.png"
 }
 
 local function combine(a, b) return fs.combine(a, b) end

@@ -3,3 +3,5 @@
 *.log
 /dock/var/
 /dock/tmp/
+
+/design-preview/

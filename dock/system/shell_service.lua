@@ -75,6 +75,12 @@ local function rounded_outline(gpu, x, y, width, height, color)
   rect(gpu, x + width - 7, y + height - 3, 4, 1, color)
 end
 
+local function rounded_fill(gpu, x, y, width, height, color)
+  rect(gpu, x + 7, y, width - 14, height, color)
+  rect(gpu, x, y + 7, width, height - 14, color)
+  rect(gpu, x + 3, y + 3, width - 6, height - 6, color)
+end
+
 local function write_buffer_chunk(buffer, chunk)
   if type(chunk) == "number" then chunk = string.char(chunk) end
   if type(chunk) ~= "string" then return false, "invalid chunk" end
@@ -373,10 +379,20 @@ function M.new(ctx)
     add_hit(ui, "dock_app", x - 2, y - 2, 20, 20, app.manifest.id)
   end
 
+  local function draw_dock_glass(ui, x, y, width, height)
+    local image = image_from_file(ui.gpu, paths.join(paths.assets, "dock-glass-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png"), ui.image_cache)
+    if image and ui.gpu.drawImage then
+      pcall(ui.gpu.drawImage, x, y, image.ref())
+    else
+      rounded_fill(ui.gpu, x, y, width, height, rgb(228, 236, 244))
+    end
+    rounded_outline(ui.gpu, x, y, width, height, COLORS.white)
+  end
+
   local function draw_dock(ui)
     local dock_w, dock_h = ui.width - 10, 24
     local dock_x, dock_y = 5, ui.height - dock_h - 4
-    rounded_outline(ui.gpu, dock_x, dock_y, dock_w, dock_h, COLORS.white)
+    draw_dock_glass(ui, dock_x, dock_y, dock_w, dock_h)
     local x = dock_x + 9
     local y = dock_y + 4
     local pinned, opened = dock_apps(ui)
