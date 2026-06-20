@@ -60,6 +60,30 @@ return {
     check("permission grant", granted.ok and ctx.permission_service.check("selftest.app", "ipc.message").data == true)
     local runtime = ctx.app_runtime_service.launch("dock.files", {})
     check("app runtime", runtime.ok and runtime.data.pid ~= nil and runtime.data.app_id == "dock.files")
+    local explorer_root = paths.join(paths.userFolder("default", "Documents"), "ExplorerSelftest")
+    if fs.exists(explorer_root) then fs.delete(explorer_root) end
+    ctx.fs_service.createDirectory(explorer_root)
+    local explorer_id = "selftest-explorer"
+    check("explorer navigate", ctx.explorer_service.navigate(explorer_id, explorer_root).ok)
+    local folder = ctx.explorer_service.createFolder(explorer_id, "Folder")
+    local file = ctx.explorer_service.createFile(explorer_id, "note.txt")
+    local listed = ctx.explorer_service.list(explorer_id)
+    check("explorer create/list", folder.ok and file.ok and listed.ok and #listed.data.rows >= 2)
+    ctx.explorer_service.select(explorer_id, file.data)
+    local copied = ctx.explorer_service.copySelected(explorer_id)
+    local pasted = ctx.explorer_service.paste(explorer_id)
+    check("explorer copy/paste", copied.ok and pasted.ok and fs.exists(pasted.data))
+    ctx.explorer_service.select(explorer_id, pasted.data)
+    local cut = ctx.explorer_service.cutSelected(explorer_id)
+    ctx.explorer_service.navigate(explorer_id, folder.data)
+    local moved = ctx.explorer_service.paste(explorer_id)
+    check("explorer cut/paste", cut.ok and moved.ok and fs.exists(moved.data))
+    ctx.explorer_service.setSearch(explorer_id, "note")
+    check("explorer search", #ctx.explorer_service.list(explorer_id).data.rows >= 1)
+    ctx.explorer_service.select(explorer_id, moved.data)
+    local trashed = ctx.explorer_service.trashSelected(explorer_id)
+    local restored_explorer = trashed.ok and ctx.fs_service.restoreFromTrash(trashed.data.id)
+    check("explorer trash/restore", restored_explorer and restored_explorer.ok and fs.exists(moved.data))
 
     local passed = 0
     for _, item in ipairs(checks) do

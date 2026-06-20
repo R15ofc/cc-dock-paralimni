@@ -1,6 +1,6 @@
 {
   "id": "dock.files",
-  "name": "Files",
+  "name": "Explorer",
   "version": "0.0.1",
   "entry": "main.lua",
   "type": "system",

@@ -187,6 +187,31 @@ local function block_size(width, height)
   return tostring(blocks_w) .. "x" .. tostring(blocks_h)
 end
 
+local function ellipsize(text, max_chars)
+  text = tostring(text or "")
+  max_chars = math.max(1, tonumber(max_chars) or #text)
+  if #text <= max_chars then return text end
+  if max_chars <= 1 then return "…" end
+  return text:sub(1, max_chars - 1) .. "…"
+end
+
+local function format_size(size)
+  size = tonumber(size) or 0
+  if size >= 1024 then return tostring(math.floor(size / 1024)) .. "K" end
+  return tostring(size) .. "B"
+end
+
+local function draw_file_icon(gpu, x, y, is_folder, selected)
+  local color = selected and COLORS.blue or COLORS.white
+  if is_folder then
+    rect(gpu, x, y + 4, 11, 7, color)
+    rect(gpu, x + 1, y + 2, 5, 2, color)
+  else
+    outline(gpu, x + 2, y + 1, 8, 11, color)
+    rect(gpu, x + 7, y + 2, 2, 2, color)
+  end
+end
+
 function M.new(ctx)
   local service = { ctx = ctx }
 
@@ -196,6 +221,7 @@ function M.new(ctx)
     safe_print("dock runtime | stop <instance_or_pid>")
     safe_print("dock permissions <app_id> | grant <app_id> <permission> | revoke <app_id> <permission>")
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
+    safe_print("dock explorer [go|back|up|search|select|new-folder|new-file|copy|cut|paste|trash]")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
     safe_print("dock trash <path> | restore <trash_id> | search <query>")
@@ -258,6 +284,28 @@ function M.new(ctx)
     elseif command == "ipc" and args[2] == "inbox" then
       local result = ctx.ipc_service.peek(tonumber(args[3]))
       for _, item in ipairs(result.data or {}) do safe_print(tostring(item.id) .. " " .. tostring(item.kind)) end
+      return result
+    elseif command == "explorer" then
+      local action = args[2] or "list"
+      local id = "shell"
+      local result
+      if action == "go" then result = ctx.explorer_service.navigate(id, join_words(args, 3))
+      elseif action == "back" then result = ctx.explorer_service.back(id)
+      elseif action == "forward" then result = ctx.explorer_service.forward(id)
+      elseif action == "up" then result = ctx.explorer_service.up(id)
+      elseif action == "search" then result = ctx.explorer_service.setSearch(id, join_words(args, 3))
+      elseif action == "select" then result = ctx.explorer_service.select(id, join_words(args, 3))
+      elseif action == "new-folder" then result = ctx.explorer_service.createFolder(id, join_words(args, 3) ~= "" and join_words(args, 3) or nil)
+      elseif action == "new-file" then result = ctx.explorer_service.createFile(id, join_words(args, 3) ~= "" and join_words(args, 3) or nil)
+      elseif action == "copy" then result = ctx.explorer_service.copySelected(id)
+      elseif action == "cut" then result = ctx.explorer_service.cutSelected(id)
+      elseif action == "paste" then result = ctx.explorer_service.paste(id)
+      elseif action == "trash" then result = ctx.explorer_service.trashSelected(id)
+      else result = ctx.explorer_service.list(id) end
+      if not result.ok then return print_result(result) end
+      local listed = ctx.explorer_service.list(id)
+      safe_print("Explorer: " .. listed.data.state.path)
+      for _, row in ipairs(listed.data.rows or {}) do safe_print((row.dir and "[D] " or "[F] ") .. row.name) end
       return result
     elseif command == "ps" then
       for _, item in ipairs(ctx.process_manager.list().data) do safe_print(tostring(item.pid) .. " " .. item.status .. " " .. item.name) end
@@ -348,6 +396,7 @@ function M.new(ctx)
       dragging_dock = nil,
       dragging_window = nil,
       dock_metrics = nil,
+      text_input = nil,
     }
   end
 
@@ -417,7 +466,11 @@ function M.new(ctx)
   end
 
   local function open_window(ui, app_id)
-    ctx.window_service.open(app_id, { x = 42, y = 24, w = math.min(220, ui.width - 70), h = math.min(120, ui.height - 58) })
+    local geometry = { x = 42, y = 24, w = math.min(220, ui.width - 70), h = math.min(120, ui.height - 58) }
+    if app_id == "dock.files" then
+      geometry = { x = 24, y = 20, w = math.min(330, ui.width - 38), h = math.min(138, ui.height - 58) }
+    end
+    ctx.window_service.open(app_id, geometry)
     sync_windows(ui)
   end
 
@@ -525,6 +578,107 @@ function M.new(ctx)
     outline(ui.gpu, x, y, w, h, COLORS.white)
   end
 
+  local function draw_explorer(ui, window, x, y, w, h)
+    local explorer = ctx.explorer_service.list(window.id)
+    if not explorer.ok then
+      draw_text(ui.gpu, x + 10, y + 24, explorer.error, COLORS.red, -1)
+      return
+    end
+    local data = explorer.data
+    local state = data.state
+    local content_x, content_y = x + 6, y + 21
+    local content_w, content_h = w - 12, h - 28
+    local sidebar_w = math.max(50, math.min(76, math.floor(content_w * 0.28)))
+    local main_x = content_x + sidebar_w + 5
+    local main_w = content_w - sidebar_w - 5
+
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(28, 31, 36))
+    rect(ui.gpu, content_x, content_y, sidebar_w, content_h, rgb(35, 39, 45))
+    rect(ui.gpu, main_x, content_y, main_w, content_h, rgb(18, 21, 25))
+
+    local toolbar_y = content_y + 4
+    local tx = main_x + 4
+    local buttons = {
+      { id = "explorer_back", text = "<" },
+      { id = "explorer_forward", text = ">" },
+      { id = "explorer_up", text = "^" },
+      { id = "explorer_refresh", text = "R" },
+      { id = "explorer_new_folder", text = "+D" },
+      { id = "explorer_new_file", text = "+F" },
+      { id = "explorer_copy", text = "C" },
+      { id = "explorer_cut", text = "X" },
+      { id = "explorer_paste", text = "P" },
+      { id = "explorer_trash", text = "T" },
+    }
+    for _, button in ipairs(buttons) do
+      local bw = #button.text > 1 and 15 or 11
+      small_round(ui.gpu, tx, toolbar_y, bw, 10, rgb(55, 61, 70))
+      draw_text(ui.gpu, tx + 3, toolbar_y + 2, button.text, COLORS.white, -1)
+      add_hit(ui, button.id, tx, toolbar_y, bw, 11, window.id)
+      tx = tx + bw + 3
+      if tx > main_x + main_w - 50 then break end
+    end
+
+    local search_w = math.max(42, math.min(80, main_w - 8))
+    local search_x = main_x + main_w - search_w - 4
+    small_round(ui.gpu, search_x, toolbar_y, search_w, 10, rgb(43, 48, 56))
+    local search_text = state.search ~= "" and state.search or "Search"
+    draw_text(ui.gpu, search_x + 5, toolbar_y + 2, ellipsize(search_text, math.floor((search_w - 8) / 6)), COLORS.white, -1)
+    add_hit(ui, "explorer_search", search_x, toolbar_y, search_w, 11, window.id)
+
+    local path_y = toolbar_y + 14
+    draw_text(ui.gpu, main_x + 5, path_y, ellipsize(state.path, math.floor((main_w - 8) / 6)), COLORS.white, -1)
+
+    local side_y = content_y + 8
+    for _, item in ipairs(data.sidebar or {}) do
+      local selected = state.path == item.path
+      if selected then rect(ui.gpu, content_x + 3, side_y - 2, sidebar_w - 6, 11, rgb(64, 78, 96)) end
+      draw_file_icon(ui.gpu, content_x + 7, side_y - 1, true, selected)
+      draw_text(ui.gpu, content_x + 22, side_y, ellipsize(item.name, math.floor((sidebar_w - 24) / 6)), COLORS.white, -1)
+      add_hit(ui, "explorer_sidebar", content_x + 3, side_y - 3, sidebar_w - 6, 12, { window_id = window.id, path = item.path })
+      side_y = side_y + 13
+      if side_y > content_y + content_h - 8 then break end
+    end
+
+    local list_y = path_y + 14
+    local row_h = 13
+    local visible_rows = math.max(1, math.floor((content_y + content_h - list_y - 15) / row_h))
+    local max_start = math.max(1, #data.rows - visible_rows + 1)
+    local start_index = math.min(max_start, math.max(1, (state.scroll or 0) + 1))
+    for index = start_index, math.min(#data.rows, start_index + visible_rows - 1) do
+      local row = data.rows[index]
+      local row_y = list_y + ((index - start_index) * row_h)
+      if row.selected then rect(ui.gpu, main_x + 3, row_y - 2, main_w - 6, row_h, rgb(0, 92, 180)) end
+      draw_file_icon(ui.gpu, main_x + 8, row_y - 2, row.dir, row.selected)
+      draw_text(ui.gpu, main_x + 23, row_y, ellipsize(row.name, math.floor((main_w - 80) / 6)), COLORS.white, -1)
+      local meta = row.dir and "folder" or format_size(row.size)
+      draw_text(ui.gpu, main_x + main_w - 45, row_y, meta, COLORS.white, -1)
+      add_hit(ui, "explorer_row", main_x + 3, row_y - 3, main_w - 6, row_h, { window_id = window.id, path = row.path })
+    end
+    if #data.rows > visible_rows then
+      small_round(ui.gpu, main_x + main_w - 13, list_y - 1, 9, 9, rgb(48, 54, 63))
+      draw_text(ui.gpu, main_x + main_w - 11, list_y + 1, "^", COLORS.white, -1)
+      add_hit(ui, "explorer_scroll_up", main_x + main_w - 14, list_y - 2, 11, 11, window.id)
+      local down_y = content_y + content_h - 22
+      small_round(ui.gpu, main_x + main_w - 13, down_y, 9, 9, rgb(48, 54, 63))
+      draw_text(ui.gpu, main_x + main_w - 11, down_y + 1, "v", COLORS.white, -1)
+      add_hit(ui, "explorer_scroll_down", main_x + main_w - 14, down_y - 1, 11, 11, window.id)
+    end
+    if #data.rows == 0 then
+      draw_text(ui.gpu, main_x + 8, list_y, state.search ~= "" and "No results" or "Empty folder", COLORS.white, -1)
+    end
+    local status_y = content_y + content_h - 10
+    rect(ui.gpu, main_x, status_y - 2, main_w, 10, rgb(24, 28, 33))
+    if data.selected then
+      local status = data.selected.name .. " · " .. (data.selected.dir and "folder" or format_size(data.selected.size)) .. " · " .. tostring(data.selected.type)
+      draw_text(ui.gpu, main_x + 5, status_y, ellipsize(status, math.floor((main_w - 10) / 6)), COLORS.white, -1)
+    elseif data.clipboard then
+      draw_text(ui.gpu, main_x + 5, status_y, "Clipboard: " .. data.clipboard.action .. " " .. data.clipboard.name, COLORS.white, -1)
+    else
+      draw_text(ui.gpu, main_x + 5, status_y, tostring(#data.rows) .. " items", COLORS.white, -1)
+    end
+  end
+
   local function draw_window(ui, window)
     if window.minimized then return end
     local x, y, w, h = window.x, window.y, window.w, window.h
@@ -542,14 +696,7 @@ function M.new(ctx)
     local app_id = window.app_id
     local content_x, content_y = x + 10, y + 22
     if app_id == "dock.files" then
-      draw_text(ui.gpu, content_x, content_y, "Files", COLORS.white, -1)
-      local rows = ctx.fs_service.getUserFolders().data or {}
-      local row_y = content_y + 14
-      for _, folder in ipairs(rows) do
-        draw_text(ui.gpu, content_x, row_y, folder.category, COLORS.white, -1)
-        row_y = row_y + 11
-        if row_y > y + h - 8 then break end
-      end
+      draw_explorer(ui, window, x, y, w, h)
     elseif app_id == "dock.settings" then
       draw_text(ui.gpu, content_x, content_y, "DockOS Paralimni 0.0.1", COLORS.white, -1)
       draw_text(ui.gpu, content_x, content_y + 14, "User: " .. ctx.user_service.getCurrentUser().name, COLORS.white, -1)
@@ -593,9 +740,11 @@ function M.new(ctx)
   local function handle_action(ui, hit, button, x, y)
     if not hit then
       ui.menu, ui.context = false, nil
+      ui.text_input = nil
       if button == 1 then ui.selecting = { x1 = x, y1 = y, x2 = x, y2 = y } end
       return
     end
+    if hit.id ~= "explorer_search" then ui.text_input = nil end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
     elseif hit.id == "about" then ui.about = true; ui.menu = false
     elseif hit.id == "about_close" then ui.about = false
@@ -609,6 +758,21 @@ function M.new(ctx)
         ui.dragging_dock = { app_id = hit.payload }
       end
     elseif hit.id == "dock_keep" then pin_app(ui, hit.payload); ui.context = nil
+    elseif hit.id == "explorer_sidebar" then ctx.explorer_service.navigate(hit.payload.window_id, hit.payload.path)
+    elseif hit.id == "explorer_row" then ctx.explorer_service.select(hit.payload.window_id, hit.payload.path)
+    elseif hit.id == "explorer_search" then ui.text_input = { kind = "explorer_search", window_id = hit.payload }
+    elseif hit.id == "explorer_back" then ctx.explorer_service.back(hit.payload)
+    elseif hit.id == "explorer_forward" then ctx.explorer_service.forward(hit.payload)
+    elseif hit.id == "explorer_up" then ctx.explorer_service.up(hit.payload)
+    elseif hit.id == "explorer_refresh" then ctx.explorer_service.state(hit.payload)
+    elseif hit.id == "explorer_new_folder" then ctx.explorer_service.createFolder(hit.payload)
+    elseif hit.id == "explorer_new_file" then ctx.explorer_service.createFile(hit.payload)
+    elseif hit.id == "explorer_copy" then ctx.explorer_service.copySelected(hit.payload)
+    elseif hit.id == "explorer_cut" then ctx.explorer_service.cutSelected(hit.payload)
+    elseif hit.id == "explorer_paste" then ctx.explorer_service.paste(hit.payload)
+    elseif hit.id == "explorer_trash" then ctx.explorer_service.trashSelected(hit.payload)
+    elseif hit.id == "explorer_scroll_up" then ctx.explorer_service.scroll(hit.payload, -1)
+    elseif hit.id == "explorer_scroll_down" then ctx.explorer_service.scroll(hit.payload, 1)
     elseif hit.id == "window_close" then close_window(ui, hit.payload)
     elseif hit.id == "window_min" then ctx.window_service.minimize(hit.payload, true); sync_windows(ui)
     elseif hit.id == "window_full" then ctx.window_service.toggleFullscreen(hit.payload); sync_windows(ui)
@@ -621,14 +785,41 @@ function M.new(ctx)
     end
   end
 
+  local function handle_text_input(ui, event, a, b)
+    if not ui.text_input or ui.text_input.kind ~= "explorer_search" then return false end
+    local window_id = ui.text_input.window_id
+    if event == "char" then
+      ctx.explorer_service.appendSearch(window_id, a)
+      return true
+    elseif event == "paste" then
+      ctx.explorer_service.appendSearch(window_id, a)
+      return true
+    elseif event == "tm_keyboard_char" then
+      ctx.explorer_service.appendSearch(window_id, b or a)
+      return true
+    elseif event == "tm_keyboard_paste" then
+      ctx.explorer_service.appendSearch(window_id, b or a)
+      return true
+    elseif event == "key" then
+      if keys and a == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
+      if keys and (a == keys.enter or a == keys.numPadEnter or a == keys.escape) then ui.text_input = nil; return true end
+    elseif event == "tm_keyboard_key" then
+      local key = b or a
+      if keys and key == keys.backspace then ctx.explorer_service.backspaceSearch(window_id); return true end
+      if keys and (key == keys.enter or key == keys.numPadEnter or key == keys.escape) then ui.text_input = nil; return true end
+    end
+    return false
+  end
+
   local function run_graphical(gpu, width, height)
     local ui = initial_ui_state(gpu, width, height)
     while true do
       render(ui)
       local event, a, b, c, d = os.pullEvent()
       if ctx.process_manager and ctx.process_manager.dispatch then ctx.process_manager.dispatch(event, a, b, c, d) end
-      if event == "rednet_message" then ctx.net_service.handleMessage(a, b, c)
-      elseif event == "key" and a == keys.q then return { ok = true }
+      if handle_text_input(ui, event, a, b) then
+      elseif event == "rednet_message" then ctx.net_service.handleMessage(a, b, c)
+      elseif event == "key" and not ui.text_input and keys and a == keys.q then return { ok = true }
       else
         local mapped, button, x, y = pixel_event(event, a, b, c, d)
         if mapped == "mouse_click" then
