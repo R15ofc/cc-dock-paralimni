@@ -1,4 +1,5 @@
 local version = require("dock.system.version")
+local splash = require("dock.system.splash")
 
 local M = {}
 
@@ -128,6 +129,12 @@ function M.new(ctx)
       return err("installer runtime unavailable", "UNAVAILABLE")
     end
     service.state.status = "installing"
+    splash.sequence({
+      logo = "DockOS",
+      message = "Please do not turn off your computer",
+      steps = { 8, 18, 28 },
+      delay = 0.08,
+    })
     local source = normalize_source(service.state.available.source)
     local handle, request_error = http.get(source .. "/dock-installer.lua")
     if not handle then
@@ -145,7 +152,9 @@ function M.new(ctx)
     out.write(handle.readAll() or "")
     out.close()
     handle.close()
+    splash.show({ logo = "DockOS", message = "Please do not turn off your computer", progress = 72 })
     shell.run(installer_path, source)
+    splash.show({ logo = "DockOS", message = "Please do not turn off your computer", progress = 100 })
     service.state.status = "installed"
     return ok(service.state)
   end

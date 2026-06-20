@@ -1,6 +1,7 @@
 local paths = require("dock.system.paths")
 local json = require("dock.system.json")
 local loading = require("dock.system.loading")
+local splash = require("dock.system.splash")
 
 return {
   run = function(ctx)
@@ -91,6 +92,14 @@ return {
     local restored_explorer = trashed.ok and ctx.fs_service.restoreFromTrash(trashed.data.id)
     check("explorer trash/restore", restored_explorer and restored_explorer.ok and fs.exists(moved.data))
     check("loading helper", loading.spinner(0) == "|" and loading.progress(50, 4):match("^##%-%-") ~= nil)
+    local fake_gpu = {
+      filledRectangle = function() end,
+      drawText = function() end,
+      getSize = function() return 128, 64 end,
+      sync = function() end,
+    }
+    local splash_ok = pcall(function() splash.draw(fake_gpu, { message = "Selftest", progress = 50 }) end)
+    check("splash helper", splash_ok)
     check("update service", ctx.update_service.status().ok and ctx.update_service.beginCheck().ok)
 
     local passed = 0

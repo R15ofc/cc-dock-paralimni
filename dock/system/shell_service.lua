@@ -410,7 +410,7 @@ function M.new(ctx)
       dragging_window = nil,
       dock_metrics = nil,
       text_input = nil,
-      settings = { section = "general" },
+      settings = { route = "general", history = {}, future = {} },
       frame = 0,
     }
   end
@@ -499,6 +499,51 @@ function M.new(ctx)
   local function active_app_id(ui)
     local window = active_window(ui)
     return window and window.app_id or nil
+  end
+
+  local function current_settings(ui)
+    ui.settings = ui.settings or { route = "general", history = {}, future = {} }
+    ui.settings.route = ui.settings.route or "general"
+    ui.settings.history = ui.settings.history or {}
+    ui.settings.future = ui.settings.future or {}
+    return ui.settings
+  end
+
+  local function settings_go(ui, route)
+    local settings = current_settings(ui)
+    route = tostring(route or "general")
+    if settings.route == route then return end
+    table.insert(settings.history, settings.route)
+    settings.route = route
+    settings.future = {}
+  end
+
+  local function settings_back(ui)
+    local settings = current_settings(ui)
+    local previous = table.remove(settings.history)
+    if not previous then return end
+    table.insert(settings.future, settings.route)
+    settings.route = previous
+  end
+
+  local function settings_forward(ui)
+    local settings = current_settings(ui)
+    local next_route = table.remove(settings.future)
+    if not next_route then return end
+    table.insert(settings.history, settings.route)
+    settings.route = next_route
+  end
+
+  local function settings_title(route)
+    local labels = {
+      general = "General",
+      software_update = "Software Update",
+      accessibility = "Accessibility",
+      appearance = "Appearance",
+      about = "About",
+      storage = "Storage",
+    }
+    return labels[route] or "Settings"
   end
 
   local function dock_apps(ui)
@@ -723,68 +768,136 @@ function M.new(ctx)
     end
   end
 
+  local function draw_settings_row(ui, label, value, x, y, width, separator)
+    local value_x = x + math.max(54, math.floor(width * 0.45))
+    local value_chars = math.max(1, math.floor((width - (value_x - x)) / 6))
+    draw_text(ui.gpu, x, y, label, rgb(84, 88, 94), -1)
+    draw_text(ui.gpu, value_x, y, ellipsize(value, value_chars), COLORS.black, -1)
+    if separator ~= false then rect(ui.gpu, x, y + 10, width, 1, rgb(219, 223, 230)) end
+  end
+
+  local function draw_settings_card(ui, x, y, width, height)
+    small_round(ui.gpu, x, y, width, height, rgb(250, 250, 252))
+  end
+
+  local function draw_settings_button(ui, id, x, y, width, height, label, payload, color, text_color)
+    small_round(ui.gpu, x, y, width, height, color or rgb(226, 231, 238))
+    draw_text(ui.gpu, x + 8, y + math.max(3, math.floor((height - 8) / 2)), ellipsize(label, math.floor((width - 16) / 6)), text_color or COLORS.black, -1)
+    add_hit(ui, id, x, y, width, height, payload)
+  end
+
   local function draw_settings(ui, window, x, y, w, h)
     local content_x, content_y = x + 6, y + 21
     local content_w, content_h = w - 12, h - 28
-    local sidebar_w = 76
-    local main_x = content_x + sidebar_w + 5
-    local main_w = content_w - sidebar_w - 5
-    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(25, 27, 31))
-    rect(ui.gpu, content_x, content_y, sidebar_w, content_h, rgb(34, 37, 43))
-    rect(ui.gpu, main_x, content_y, main_w, content_h, rgb(238, 241, 245))
+    local settings = current_settings(ui)
+    local route = settings.route
+    local rail_w = math.max(54, math.min(96, math.floor(content_w * 0.34)))
+    rail_w = math.min(rail_w, math.max(50, content_w - 70))
+    local main_x = content_x
+    local main_w = content_w - rail_w - 5
+    local rail_x = content_x + content_w - rail_w
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(238, 241, 245))
+    rect(ui.gpu, rail_x, content_y, rail_w, content_h, rgb(31, 34, 40))
 
-    local section = ui.settings and ui.settings.section or "general"
-    local tabs = {
+    local top_y = content_y + 5
+    draw_settings_button(ui, "settings_back", main_x + 6, top_y, 18, 12, "<", nil, #settings.history > 0 and rgb(210, 216, 224) or rgb(196, 200, 206))
+    draw_settings_button(ui, "settings_forward", main_x + 28, top_y, 18, 12, ">", nil, #settings.future > 0 and rgb(210, 216, 224) or rgb(196, 200, 206))
+    draw_text(ui.gpu, main_x + 54, top_y + 2, settings_title(route), COLORS.black, -1)
+
+    local sections = {
       { id = "general", label = "General" },
+      { id = "accessibility", label = "Accessibility" },
       { id = "appearance", label = "Appearance" },
+      { id = "about", label = "About" },
+      { id = "storage", label = "Storage" },
     }
     local tab_y = content_y + 10
-    for _, tab in ipairs(tabs) do
-      local selected = section == tab.id
-      if selected then small_round(ui.gpu, content_x + 6, tab_y - 4, sidebar_w - 12, 14, rgb(60, 70, 84)) end
-      draw_text(ui.gpu, content_x + 14, tab_y, tab.label, COLORS.white, -1)
-      add_hit(ui, "settings_nav", content_x + 5, tab_y - 5, sidebar_w - 10, 16, tab.id)
+    for _, tab in ipairs(sections) do
+      local selected = route == tab.id or (tab.id == "general" and route == "software_update")
+      if selected then small_round(ui.gpu, rail_x + 6, tab_y - 4, rail_w - 12, 14, rgb(70, 78, 92)) end
+      draw_text(ui.gpu, rail_x + 14, tab_y, ellipsize(tab.label, math.floor((rail_w - 20) / 6)), COLORS.white, -1)
+      add_hit(ui, "settings_nav", rail_x + 5, tab_y - 5, rail_w - 10, 16, tab.id)
       tab_y = tab_y + 18
     end
 
-    if section == "appearance" then
-      draw_text(ui.gpu, main_x + 10, content_y + 10, "Appearance", COLORS.black, -1)
+    local body_x, body_y = main_x + 10, content_y + 24
+    local body_w = main_w - 20
+    if route == "general" then
+      draw_text(ui.gpu, body_x, body_y, "Categories", rgb(84, 88, 94), -1)
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 15, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
+      draw_settings_button(ui, "settings_sub", body_x, body_y + 36, body_w, 17, "Accessibility", "accessibility", rgb(250, 250, 252))
+      return
+    elseif route == "appearance" then
       local themes = { "Blue", "Red", "Green", "White", "Dark" }
-      local y_pos = content_y + 31
-      for _, theme in ipairs(themes) do
-        small_round(ui.gpu, main_x + 10, y_pos - 4, 54, 14, rgb(215, 221, 230))
-        draw_text(ui.gpu, main_x + 20, y_pos, theme, COLORS.black, -1)
-        add_hit(ui, "settings_theme", main_x + 10, y_pos - 4, 54, 14, theme:lower())
-        y_pos = y_pos + 18
+      local columns = body_w >= 126 and 2 or 1
+      local gap = 8
+      local tile_w = math.floor((body_w - ((columns - 1) * gap)) / columns)
+      local colors_by_theme = {
+        Blue = COLORS.blue,
+        Red = COLORS.red,
+        Green = COLORS.green,
+        White = rgb(245, 245, 245),
+        Dark = rgb(28, 31, 36),
+      }
+      for index, theme in ipairs(themes) do
+        local col = (index - 1) % columns
+        local row = math.floor((index - 1) / columns)
+        local tile_x = body_x + col * (tile_w + gap)
+        local tile_y = body_y + row * 21
+        if tile_y + 16 <= content_y + content_h - 5 then
+          draw_settings_button(ui, "settings_theme", tile_x, tile_y, tile_w, 16, theme, theme:lower(), colors_by_theme[theme] or rgb(226, 231, 238), theme == "Dark" and COLORS.white or COLORS.black)
+        end
       end
       return
     end
 
-    local update = ctx.update_service.poll().data
-    draw_text(ui.gpu, main_x + 10, content_y + 10, "General", COLORS.black, -1)
-    draw_text(ui.gpu, main_x + 10, content_y + 25, "Software Update", COLORS.black, -1)
-    draw_text(ui.gpu, main_x + 10, content_y + 39, "DockOS " .. ctx.version.codename .. " " .. ctx.version.version, rgb(88, 92, 98), -1)
-
-    local card_x, card_y = main_x + 10, content_y + 57
-    local card_w, card_h = main_w - 20, math.max(42, content_h - 67)
-    small_round(ui.gpu, card_x, card_y, card_w, card_h, rgb(250, 250, 252))
-    outline(ui.gpu, card_x, card_y, card_w, card_h, rgb(205, 211, 220))
-
-    if update.status == "checking" then
-      draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Fetching Updates", ui.frame), rgb(116, 121, 128), -1)
-    elseif update.status == "available" and update.available then
-      draw_text(ui.gpu, card_x + 12, card_y + 9, ellipsize(update.available.title, math.floor((card_w - 24) / 6)), COLORS.black, -1)
-      draw_text(ui.gpu, card_x + 12, card_y + 23, ellipsize(update.available.changelog, math.floor((card_w - 24) / 6)), rgb(84, 88, 94), -1)
-      draw_text(ui.gpu, card_x + 12, card_y + 37, "Install time: " .. update.available.eta, rgb(84, 88, 94), -1)
-      small_round(ui.gpu, card_x + card_w - 62, card_y + card_h - 19, 50, 14, COLORS.blue)
-      draw_text(ui.gpu, card_x + card_w - 51, card_y + card_h - 15, "Update", COLORS.white, -1)
-      add_hit(ui, "settings_update_install", card_x + card_w - 62, card_y + card_h - 19, 50, 14)
-    elseif update.status == "installing" then
-      draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Installing Update", ui.frame), rgb(116, 121, 128), -1)
-    elseif update.status == "installed" then
-      draw_text(ui.gpu, card_x + 12, card_y + 14, "Update installed. Reboot required.", rgb(60, 64, 70), -1)
+    if route == "software_update" then
+      local update = ctx.update_service.poll().data
+      draw_text(ui.gpu, body_x, body_y, "DockOS " .. ctx.version.codename .. " " .. ctx.version.version, rgb(88, 92, 98), -1)
+      local card_x, card_y = body_x, body_y + 16
+      local card_w, card_h = body_w, math.max(48, content_y + content_h - card_y - 6)
+      draw_settings_card(ui, card_x, card_y, card_w, card_h)
+      if update.status == "checking" then
+        draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Fetching Updates", ui.frame), rgb(116, 121, 128), -1)
+      elseif update.status == "available" and update.available then
+        draw_text(ui.gpu, card_x + 12, card_y + 9, ellipsize(update.available.title, math.floor((card_w - 24) / 6)), COLORS.black, -1)
+        draw_text(ui.gpu, card_x + 12, card_y + 23, ellipsize(update.available.changelog, math.floor((card_w - 24) / 6)), rgb(84, 88, 94), -1)
+        draw_text(ui.gpu, card_x + 12, card_y + 37, "Install time: " .. update.available.eta, rgb(84, 88, 94), -1)
+        draw_settings_button(ui, "settings_update_install", card_x + card_w - 62, card_y + card_h - 19, 50, 14, "Update", nil, COLORS.blue, COLORS.white)
+      elseif update.status == "installing" then
+        draw_text(ui.gpu, card_x + 12, card_y + 14, loading.text("Installing Update", ui.frame), rgb(116, 121, 128), -1)
+      elseif update.status == "installed" then
+        draw_text(ui.gpu, card_x + 12, card_y + 14, "Update installed. Reboot required.", rgb(60, 64, 70), -1)
+      else
+        draw_text(ui.gpu, card_x + 12, card_y + 14, "No updates", rgb(116, 121, 128), -1)
+      end
+    elseif route == "about" then
+      local card_h = 49
+      draw_settings_card(ui, body_x, body_y, body_w, card_h)
+      draw_text(ui.gpu, body_x + 10, body_y + 6, "Computer Info", COLORS.black, -1)
+      draw_settings_row(ui, "Type", terminal_type(), body_x + 10, body_y + 18, body_w - 20)
+      draw_settings_row(ui, "Memory", "-", body_x + 10, body_y + 29, body_w - 20)
+      draw_settings_row(ui, "Storage", "-", body_x + 10, body_y + 40, body_w - 20, false)
+      local dock_card_y = body_y + card_h + 6
+      if dock_card_y + 27 <= content_y + content_h then
+        draw_settings_card(ui, body_x, dock_card_y, body_w, 27)
+        draw_text(ui.gpu, body_x + 10, dock_card_y + 5, "DockOS", COLORS.black, -1)
+        draw_text(ui.gpu, body_x + 10, dock_card_y + 17, "DockOS " .. ctx.version.codename .. " " .. ctx.version.version, rgb(84, 88, 94), -1)
+      end
+    elseif route == "storage" then
+      local free = fs.getFreeSpace and fs.getFreeSpace("/") or nil
+      local used_label = "-"
+      local free_label = type(free) == "number" and format_size(free) or tostring(free or "-")
+      draw_settings_card(ui, body_x, body_y, body_w, 48)
+      draw_text(ui.gpu, body_x + 10, body_y + 8, "Storage", COLORS.black, -1)
+      draw_settings_row(ui, "Used", used_label, body_x + 10, body_y + 23, body_w - 20)
+      draw_settings_row(ui, "Available", free_label, body_x + 10, body_y + 36, body_w - 20)
+    elseif route == "accessibility" then
+      draw_settings_card(ui, body_x, body_y, body_w, 44)
+      draw_text(ui.gpu, body_x + 10, body_y + 9, "Accessibility", COLORS.black, -1)
+      draw_text(ui.gpu, body_x + 10, body_y + 24, ellipsize("Display and input options will be here.", math.floor((body_w - 20) / 6)), rgb(84, 88, 94), -1)
     else
-      draw_text(ui.gpu, card_x + 12, card_y + 14, "No updates", rgb(116, 121, 128), -1)
+      draw_text(ui.gpu, body_x, body_y, "Section unavailable", rgb(84, 88, 94), -1)
     end
   end
 
@@ -895,7 +1008,10 @@ function M.new(ctx)
     elseif hit.id == "explorer_trash" then ctx.explorer_service.trashSelected(hit.payload)
     elseif hit.id == "explorer_scroll_up" then ctx.explorer_service.scroll(hit.payload, -1)
     elseif hit.id == "explorer_scroll_down" then ctx.explorer_service.scroll(hit.payload, 1)
-    elseif hit.id == "settings_nav" then ui.settings.section = hit.payload
+    elseif hit.id == "settings_back" then settings_back(ui)
+    elseif hit.id == "settings_forward" then settings_forward(ui)
+    elseif hit.id == "settings_nav" then settings_go(ui, hit.payload)
+    elseif hit.id == "settings_sub" then settings_go(ui, hit.payload)
     elseif hit.id == "settings_theme" then ctx.settings_service.set("user.theme", hit.payload)
     elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
     elseif hit.id == "window_close" then close_window(ui, hit.payload)

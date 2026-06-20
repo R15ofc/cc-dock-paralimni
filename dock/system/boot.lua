@@ -2,6 +2,7 @@ local paths = require("dock.system.paths")
 local safe_io = require("dock.system.safe_io")
 local logger = require("dock.system.logger")
 local kernel = require("dock.system.kernel")
+local splash = require("dock.system.splash")
 
 local M = {}
 local current
@@ -35,6 +36,9 @@ function M.context()
 end
 
 function M.start(options)
+  if options and options.mode == "desktop" then
+    splash.sequence({ logo = "DockOS", progress = 8 })
+  end
   local booted = M.boot()
   if not booted.ok then
     print("DockOS boot failed: " .. tostring(booted.error))
