@@ -1,7 +1,7 @@
 {
   "id": "dock.studio",
   "name": "App Studio",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "entry": "main.lua",
   "type": "system",
   "category": "developer",

@@ -14,6 +14,7 @@ local FILES = {
   "dock/apps/system/terminal/app.json", "dock/apps/system/terminal/main.lua",
   "dock/apps/system/settings/app.json", "dock/apps/system/settings/main.lua",
   "dock/apps/system/studio/app.json", "dock/apps/system/studio/main.lua",
+  "dock/apps/system/browser/app.json", "dock/apps/system/browser/main.lua",
   "dock/tests/selftest.lua",
   "dock/assets/wallpaper-128x64.png",
   "dock/assets/wallpaper-256x96.png",

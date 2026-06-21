@@ -15,6 +15,25 @@ local function join_words(args, start_index)
   return table.concat(parts, " ")
 end
 
+local function split_command(line)
+  local args, current, quote = {}, "", nil
+  for index = 1, #tostring(line or "") do
+    local char = line:sub(index, index)
+    if quote then
+      if char == quote then quote = nil else current = current .. char end
+    elseif char == '"' or char == "'" then
+      quote = char
+    elseif char:match("%s") then
+      if current ~= "" then table.insert(args, current); current = "" end
+    else
+      current = current .. char
+    end
+  end
+  if current ~= "" then table.insert(args, current) end
+  if args[1] == "dock" then table.remove(args, 1) end
+  return args
+end
+
 local function rgb(red, green, blue)
   red = math.max(0, math.min(255, math.floor(red or 0)))
   green = math.max(0, math.min(255, math.floor(green or 0)))
@@ -48,8 +67,11 @@ local function terminal_type()
   return "Normal"
 end
 
+local SHELL_OUTPUT_SINK = nil
+
 local function safe_print(line)
-  print(tostring(line or ""))
+  line = tostring(line or "")
+  if SHELL_OUTPUT_SINK then table.insert(SHELL_OUTPUT_SINK, line) else print(line) end
 end
 
 local GPU_SIZE_CACHE = setmetatable({}, { __mode = "k" })
@@ -242,7 +264,12 @@ end
 
 local function image_from_file(gpu, path, cache)
   if not gpu or not gpu.newBuffer or not gpu.decodeImage or not gpu.drawImage or not fs.exists(path) or fs.isDir(path) then return nil end
-  local key = path .. ":" .. tostring(fs.getSize(path) or 0)
+  local modified = ""
+  if fs.attributes then
+    local ok_attr, attr = pcall(fs.attributes, path)
+    if ok_attr and type(attr) == "table" then modified = tostring(attr.modified or attr.modification or attr.created or "") end
+  end
+  local key = path .. ":" .. tostring(fs.getSize(path) or 0) .. ":" .. modified
   if cache[key] then return cache[key] end
   local ok_buffer, buffer = pcall(gpu.newBuffer, math.max(32, fs.getSize(path) or 32))
   if not ok_buffer or not buffer then return nil end
@@ -620,6 +647,12 @@ function M.new(ctx)
       for _, app in ipairs(apps) do table.insert(pinned, app.manifest.id) end
       ctx.settings_service.set("user.dock.pinned", pinned)
     end
+    local has_browser = false
+    for _, id in ipairs(pinned) do if id == "dock.browser" then has_browser = true end end
+    if not has_browser and ctx.app_service.getApp("dock.browser").ok then
+      table.insert(pinned, "dock.browser")
+      ctx.settings_service.set("user.dock.pinned", pinned)
+    end
     ctx.window_service.restore(width, height)
     return {
       gpu = gpu,
@@ -638,8 +671,11 @@ function M.new(ctx)
       dragging_window = nil,
       dragging_studio = nil,
       dragging_file = nil,
+      dragging_scrollbar = nil,
       last_click = nil,
       dock_metrics = nil,
+      terminals = {},
+      browsers = {},
       text_input = nil,
       dragging_text = nil,
       modifiers = { ctrl = false, shift = false },
@@ -740,8 +776,13 @@ function M.new(ctx)
   end
 
   local function draw_wallpaper(ui)
+    local custom_path = ctx.settings_service.get("user.wallpaper.path", "").data
+    local image = nil
+    if custom_path and custom_path ~= "" then
+      image = image_from_file(ui.gpu, custom_path, ui.image_cache)
+    end
     local exact_path = paths.join(paths.assets, "wallpaper-" .. tostring(ui.width) .. "x" .. tostring(ui.height) .. ".png")
-    local image = image_from_file(ui.gpu, exact_path, ui.image_cache)
+    if not image then image = image_from_file(ui.gpu, exact_path, ui.image_cache) end
     if not image then image = image_from_file(ui.gpu, paths.join(paths.assets, "wallpaper-384x192.png"), ui.image_cache) end
     if image and ui.gpu.drawImage then
       local iw = image.getWidth and image.getWidth() or ui.width
@@ -758,6 +799,16 @@ function M.new(ctx)
     else
       rect(ui.gpu, 1, 1, ui.width, ui.height, rgb(28, 60, 72))
     end
+  end
+
+  local function set_wallpaper(ui, path)
+    path = tostring(path or "")
+    if path ~= "" and (not fs.exists(path) or fs.isDir(path) or ctx.fs_service.getFileType(path).data ~= "image") then
+      return { ok = false, error = "Select an image file" }
+    end
+    ctx.settings_service.set("user.wallpaper.path", path)
+    ui.image_cache = {}
+    return { ok = true, data = path }
   end
 
   local function draw_top(ui)
@@ -832,6 +883,73 @@ function M.new(ctx)
     return ui.settings
   end
 
+  local function terminal_state(ui, window_id)
+    ui.terminals = ui.terminals or {}
+    local id = tostring(window_id or "main")
+    if not ui.terminals[id] then
+      ui.terminals[id] = {
+        input = "",
+        lines = {
+          "DockOS Terminal",
+          "Type help or dock help.",
+        },
+        scroll = 0,
+      }
+    end
+    return ui.terminals[id]
+  end
+
+  local function run_terminal_command(ui, window_id, line)
+    local state = terminal_state(ui, window_id)
+    line = tostring(line or "")
+    if line:gsub("%s+", "") == "" then return end
+    table.insert(state.lines, "> " .. line)
+    local args = split_command(line)
+    if args[1] == "clear" then
+      state.lines = {}
+    elseif #args > 0 then
+      local out = {}
+      local previous_sink = SHELL_OUTPUT_SINK
+      SHELL_OUTPUT_SINK = out
+      local ok_run, result = pcall(service.runCommand, args)
+      SHELL_OUTPUT_SINK = previous_sink
+      if not ok_run then table.insert(out, tostring(result)) end
+      for _, output_line in ipairs(out) do table.insert(state.lines, output_line) end
+      if result and result.ok == false and #out == 0 then table.insert(state.lines, result.error or "Command failed") end
+    end
+    state.input = ""
+    state.scroll = math.max(0, #state.lines - 8)
+  end
+
+  local function browser_state(ui, window_id)
+    ui.browsers = ui.browsers or {}
+    local id = tostring(window_id or "main")
+    if not ui.browsers[id] then
+      ui.browsers[id] = {
+        address = "luma://creator",
+        page = "creator",
+        title = "Luma Web Creator",
+        status = "ready",
+      }
+    end
+    return ui.browsers[id]
+  end
+
+  local function navigate_browser(ui, window_id, address)
+    local state = browser_state(ui, window_id)
+    address = tostring(address or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if address == "" then address = "luma://home" end
+    state.address = address
+    local lowered = address:lower()
+    if lowered:find("creator", 1, true) or lowered == "luma://creator" then
+      state.page = "creator"; state.title = "Luma Web Creator"; state.status = "loaded"
+    elseif lowered:find("store", 1, true) then
+      state.page = "store"; state.title = "Luma Store"; state.status = "loaded"
+    else
+      state.page = "search"; state.title = "Search"; state.status = "results"
+    end
+  end
+
   local function settings_go(ui, route)
     local settings = current_settings(ui)
     route = tostring(route or "general")
@@ -880,6 +998,9 @@ function M.new(ctx)
       privacy_security = "Privacy & Security",
       about = "About",
       storage = "Storage",
+      wallpaper = "Wallpaper",
+      browser_info = "Browser",
+      terminal_info = "Terminal",
     }
     return labels[route] or "Settings"
   end
@@ -939,6 +1060,10 @@ function M.new(ctx)
       rect(ui.gpu, x + 4, y + 7, 8, 1, COLORS.white)
       rect(ui.gpu, x + 4, y + 10, 6, 1, COLORS.white)
       rect(ui.gpu, x + 12, y + 10, 2, 3, COLORS.white)
+    elseif icon == "browser" then
+      outline(ui.gpu, x + 4, y + 4, 8, 8, COLORS.white)
+      rect(ui.gpu, x + 6, y + 6, 4, 1, COLORS.white)
+      rect(ui.gpu, x + 6, y + 9, 5, 1, COLORS.white)
     elseif icon == "placeholder" then
       draw_placeholder_icon(ui.gpu, x, y)
     else
@@ -1064,6 +1189,10 @@ function M.new(ctx)
       ctx.studio_service.updateSelectedField(ui.text_input.extra.field, view.value)
     elseif tostring(ui.text_input.kind or ""):match("^settings_cloud_") and ui.text_input.extra and ui.text_input.extra.field then
       current_settings(ui).account_form[ui.text_input.extra.field] = view.value
+    elseif ui.text_input.kind == "terminal_input" then
+      terminal_state(ui, ui.text_input.window_id).input = view.value
+    elseif ui.text_input.kind == "browser_address" then
+      browser_state(ui, ui.text_input.window_id).address = view.value
     end
   end
 
@@ -1154,6 +1283,7 @@ function M.new(ctx)
       { id = "explorer_cut", text = "X" },
       { id = "explorer_paste", text = "P" },
       { id = "explorer_trash", text = "T" },
+      { id = "explorer_wallpaper", text = "WP" },
     }
     for _, button in ipairs(buttons) do
       local bw = #button.text > 1 and 15 or 11
@@ -1347,7 +1477,7 @@ function M.new(ctx)
     }
     local tab_y = content_y + 10
     for _, tab in ipairs(sections) do
-      local selected = route == tab.id or (tab.id == "general" and (route == "software_update" or route == "about" or route == "storage" or route == "devices"))
+      local selected = route == tab.id or (tab.id == "general" and (route == "software_update" or route == "about" or route == "storage" or route == "devices" or route == "wallpaper"))
       if selected then small_round(ui.gpu, rail_x + 6, tab_y - 4, rail_w - 12, 14, rgb(70, 78, 92)) end
       draw_text(ui.gpu, rail_x + 14, tab_y, ellipsize(tab.label, math.floor((rail_w - 20) / 6)), COLORS.white, -1)
       add_hit(ui, "settings_nav", rail_x + 5, tab_y - 5, rail_w - 10, 16, tab.id)
@@ -1357,11 +1487,50 @@ function M.new(ctx)
     local body_x, body_y = main_x + 10, content_y + 24
     local body_w = main_w - 20
     if route == "general" then
+      local rows = {
+        { label = "About This Computer", route = "about" },
+        { label = "Storage", route = "storage" },
+        { label = "Devices", route = "devices" },
+        { label = "Software Update", route = "software_update" },
+        { label = "Wallpaper", route = "wallpaper" },
+        { label = "Account", route = "account" },
+        { label = "Browser", route = "browser_info" },
+        { label = "Terminal", route = "terminal_info" },
+      }
       draw_text(ui.gpu, body_x, body_y, "Categories", rgb(84, 88, 94), -1)
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 15, body_w, 17, "About This Computer", "about", rgb(250, 250, 252))
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 36, body_w, 17, "Storage", "storage", rgb(250, 250, 252))
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 57, body_w, 17, "Devices", "devices", rgb(250, 250, 252))
-      draw_settings_button(ui, "settings_sub", body_x, body_y + 78, body_w, 17, "Software Update", "software_update", rgb(250, 250, 252))
+      local row_h = 21
+      local visible = math.max(1, math.floor((content_y + content_h - body_y - 15) / row_h))
+      local max_scroll = math.max(0, #rows - visible)
+      local scroll = math.min(math.max(0, tonumber(settings.scroll.general) or 0), max_scroll)
+      settings.scroll.general = scroll
+      for index = 1, math.min(visible, #rows) do
+        local row = rows[index + scroll]
+        draw_settings_button(ui, "settings_sub", body_x, body_y + 15 + ((index - 1) * row_h), body_w - 8, 17, row.label, row.route, rgb(250, 250, 252))
+      end
+      local metrics = scrollbar.metrics(#rows, visible, scroll, body_x + body_w - 5, body_y + 15, math.max(14, visible * row_h - 4))
+      scrollbar.draw(ui.gpu, metrics, { track = rgb(220, 224, 230), thumb = rgb(110, 118, 128) })
+      if metrics.enabled then add_hit(ui, "settings_scrollbar", metrics.x - 3, metrics.y, 10, metrics.h, { route = "general", metrics = metrics }) end
+      return
+    elseif route == "wallpaper" then
+      local current = tostring(ctx.settings_service.get("user.wallpaper.path", "").data or "")
+      draw_settings_card(ui, body_x, body_y, body_w, math.min(78, content_y + content_h - body_y - 6))
+      draw_text(ui.gpu, body_x + 10, body_y + 8, "Desktop Wallpaper", COLORS.black, -1)
+      draw_settings_row(ui, "Current", current ~= "" and current or "Default", body_x + 10, body_y + 24, body_w - 20)
+      draw_settings_button(ui, "settings_open_pictures", body_x + 10, body_y + 42, math.min(82, body_w - 20), 14, "Open Pictures", nil, COLORS.blue, COLORS.white)
+      draw_settings_button(ui, "settings_wallpaper_clear", body_x + 98, body_y + 42, math.min(58, body_w - 108), 14, "Clear", nil, rgb(226, 231, 238), COLORS.black)
+      if body_y + 68 <= content_y + content_h then draw_text(ui.gpu, body_x + 10, body_y + 63, "Explorer: select image, press WP", rgb(84, 88, 94), -1) end
+      return
+    elseif route == "browser_info" then
+      draw_settings_card(ui, body_x, body_y, body_w, math.min(58, content_y + content_h - body_y - 6))
+      draw_text(ui.gpu, body_x + 10, body_y + 8, "Luma Browser", COLORS.black, -1)
+      draw_settings_row(ui, "Status", "Built-in", body_x + 10, body_y + 24, body_w - 20)
+      draw_settings_button(ui, "settings_open_browser", body_x + 10, body_y + 42, math.min(82, body_w - 20), 14, "Open Luma", nil, COLORS.blue, COLORS.white)
+      return
+    elseif route == "terminal_info" then
+      draw_settings_card(ui, body_x, body_y, body_w, math.min(58, content_y + content_h - body_y - 6))
+      draw_text(ui.gpu, body_x + 10, body_y + 8, "Terminal", COLORS.black, -1)
+      draw_settings_row(ui, "Shell", "Dock commands", body_x + 10, body_y + 24, body_w - 20)
+      draw_settings_button(ui, "settings_open_terminal", body_x + 10, body_y + 42, math.min(90, body_w - 20), 14, "Open Terminal", nil, COLORS.blue, COLORS.white)
       return
     elseif route == "appearance" then
       local themes = { "Blue", "Red", "Green", "White", "Dark" }
@@ -1955,6 +2124,69 @@ function M.new(ctx)
     end
   end
 
+  local function draw_terminal(ui, window, x, y, w, h)
+    local state = terminal_state(ui, window.id)
+    local content_x, content_y = x + 8, y + 22
+    local content_w, content_h = w - 16, h - 28
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(7, 9, 12))
+    outline(ui.gpu, content_x, content_y, content_w, content_h, rgb(42, 48, 58))
+    local line_h = 11
+    local prompt_h = 15
+    local visible = math.max(1, math.floor((content_h - prompt_h - 8) / line_h))
+    local max_scroll = math.max(0, #state.lines - visible)
+    state.scroll = math.min(math.max(0, tonumber(state.scroll) or max_scroll), max_scroll)
+    local start = math.max(1, #state.lines - visible - state.scroll + 1)
+    local draw_y = content_y + 6
+    for index = start, math.min(#state.lines, start + visible - 1) do
+      draw_text(ui.gpu, content_x + 7, draw_y, ellipsize(state.lines[index], math.floor((content_w - 14) / CELL_W)), rgb(218, 236, 255), -1)
+      draw_y = draw_y + line_h
+    end
+    local input_y = content_y + content_h - prompt_h - 4
+    rect(ui.gpu, content_x + 5, input_y, content_w - 10, prompt_h, rgb(14, 18, 24))
+    draw_text(ui.gpu, content_x + 10, input_y + 4, ">", rgb(132, 235, 164), -1)
+    local active = focused_input(ui, "terminal_input", window.id)
+    local input_key = input_id("terminal_input", window.id)
+    draw_text_editor(ui, content_x + 22, input_y + 4, content_w - 36, state.input or "", active, input_key, COLORS.white, -1)
+    add_hit(ui, "terminal_input", content_x + 5, input_y, content_w - 10, prompt_h, { window_id = window.id, text_x = content_x + 22 })
+  end
+
+  local function draw_browser(ui, window, x, y, w, h)
+    local state = browser_state(ui, window.id)
+    local content_x, content_y = x + 6, y + 21
+    local content_w, content_h = w - 12, h - 28
+    rect(ui.gpu, content_x, content_y, content_w, content_h, rgb(245, 247, 252))
+    rect(ui.gpu, content_x, content_y, content_w, 28, rgb(28, 31, 38))
+    local tab_w = math.min(92, math.max(58, math.floor(content_w * 0.28)))
+    small_round(ui.gpu, content_x + 6, content_y + 5, tab_w, 18, rgb(48, 54, 66))
+    draw_text(ui.gpu, content_x + 13, content_y + 11, ellipsize(state.title or "Luma", math.floor((tab_w - 18) / CELL_W)), COLORS.white, -1)
+    local address_x = content_x + tab_w + 13
+    local address_w = math.max(50, content_w - tab_w - 22)
+    small_round(ui.gpu, address_x, content_y + 6, address_w, 16, rgb(238, 241, 247))
+    local active = focused_input(ui, "browser_address", window.id)
+    local address_key = input_id("browser_address", window.id)
+    local shown = tostring(state.address or "")
+    draw_text_editor(ui, address_x + 8, content_y + 11, address_w - 14, shown, active, address_key, COLORS.black, -1)
+    add_hit(ui, "browser_address", address_x, content_y + 6, address_w, 17, { window_id = window.id, text_x = address_x + 8 })
+    local page_x, page_y = content_x + 10, content_y + 40
+    local page_w = content_w - 20
+    if state.page == "creator" then
+      draw_text(ui.gpu, page_x, page_y, "Luma Web Creator", rgb(16, 23, 34), -1)
+      draw_text(ui.gpu, page_x, page_y + 15, "Create pages for .luma .store .game", rgb(78, 88, 104), -1)
+      small_round(ui.gpu, page_x, page_y + 35, page_w, 20, rgb(230, 236, 246))
+      draw_text(ui.gpu, page_x + 9, page_y + 42, "Title / Text / Image blocks", rgb(40, 48, 60), -1)
+      small_round(ui.gpu, page_x, page_y + 63, math.min(92, page_w), 17, COLORS.blue)
+      draw_text(ui.gpu, page_x + 12, page_y + 68, "New Site", COLORS.white, -1)
+    elseif state.page == "store" then
+      draw_text(ui.gpu, page_x, page_y, "Luma Store", rgb(16, 23, 34), -1)
+      draw_text(ui.gpu, page_x, page_y + 16, "Pinned: Web Creator, Docs, Studio", rgb(78, 88, 104), -1)
+    else
+      draw_text(ui.gpu, page_x, page_y, "Anything you imagine", rgb(16, 23, 34), -1)
+      small_round(ui.gpu, page_x, page_y + 22, page_w, 21, rgb(230, 236, 246))
+      draw_text(ui.gpu, page_x + 10, page_y + 29, ellipsize(state.address or "Search", math.floor((page_w - 20) / CELL_W)), rgb(78, 88, 104), -1)
+    end
+    draw_text(ui.gpu, content_x + 10, content_y + content_h - 12, state.status or "ready", rgb(112, 120, 134), -1)
+  end
+
   local function draw_window(ui, window)
     if window.minimized then return end
     local x, y, w, h = window.x, window.y, window.w, window.h
@@ -1981,8 +2213,9 @@ function M.new(ctx)
     elseif app_id == "dock.studio" then
       draw_studio(ui, window, x, y, w, h)
     elseif app_id == "dock.terminal" then
-      draw_text(ui.gpu, content_x, content_y, "Terminal", COLORS.white, -1)
-      draw_text(ui.gpu, content_x, content_y + 14, "Use dock commands from CraftOS.", COLORS.white, -1)
+      draw_terminal(ui, window, x, y, w, h)
+    elseif app_id == "dock.browser" then
+      draw_browser(ui, window, x, y, w, h)
     else
       if not draw_generated_app(ui, window, x, y, w, h) then
         draw_text(ui.gpu, content_x, content_y, window.app.manifest.name, COLORS.white, -1)
@@ -2011,7 +2244,7 @@ function M.new(ctx)
     draw_about(ui)
     if ctx.cursor_service then
       local hover = hit_at(ui, ui.cursor.x, ui.cursor.y)
-      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text or ui.dragging_studio or ui.dragging_file)
+      local kind = ctx.cursor_service.infer(hover, ui.dragging_window or ui.dragging_dock or ui.dragging_text or ui.dragging_studio or ui.dragging_file or ui.dragging_scrollbar)
       ctx.cursor_service.draw(ui.gpu, kind, ui.frame)
     end
     if ui.gpu.sync then pcall(ui.gpu.sync) end
@@ -2101,6 +2334,15 @@ function M.new(ctx)
       local value = tostring(view and view.value or "")
       current_settings(ui).account_form[input.extra.field] = value
       if commit and input.extra.field == "server" and ctx.cloud_service then ctx.cloud_service.configure(value) end
+    elseif input.kind == "terminal_input" then
+      local view = ctx.text_input_service.view(input.input_id).data
+      local value = tostring(view and view.value or "")
+      terminal_state(ui, input.window_id).input = value
+      if commit then run_terminal_command(ui, input.window_id, value) end
+    elseif input.kind == "browser_address" then
+      local view = ctx.text_input_service.view(input.input_id).data
+      local value = tostring(view and view.value or "")
+      if commit then navigate_browser(ui, input.window_id, value) else browser_state(ui, input.window_id).address = value end
     end
     ui.text_input = nil
   end
@@ -2123,6 +2365,10 @@ function M.new(ctx)
     elseif ui.text_input and ui.text_input.kind == "settings_password" and hit.id ~= "settings_password_field" then
       finish_text_input(ui, true)
     elseif ui.text_input and tostring(ui.text_input.kind or ""):match("^settings_cloud_") and hit.id ~= "settings_cloud_field" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "terminal_input" and hit.id ~= "terminal_input" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and ui.text_input.kind == "browser_address" and hit.id ~= "browser_address" then
       finish_text_input(ui, true)
     end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
@@ -2194,6 +2440,10 @@ function M.new(ctx)
     elseif hit.id == "explorer_cut" then ctx.explorer_service.cutSelected(hit.payload)
     elseif hit.id == "explorer_paste" then ctx.explorer_service.paste(hit.payload)
     elseif hit.id == "explorer_trash" then ctx.explorer_service.trashSelected(hit.payload)
+    elseif hit.id == "explorer_wallpaper" then
+      local listed = ctx.explorer_service.list(hit.payload)
+      local selected = listed.ok and listed.data and listed.data.selected
+      if selected and selected.type == "image" and not selected.dir then set_wallpaper(ui, selected.path) end
     elseif hit.id == "explorer_scroll_up" then ctx.explorer_service.scroll(hit.payload, -1)
     elseif hit.id == "explorer_scroll_down" then ctx.explorer_service.scroll(hit.payload, 1)
     elseif hit.id == "settings_back" then settings_back(ui)
@@ -2203,7 +2453,18 @@ function M.new(ctx)
     elseif hit.id == "settings_scrollbar" then
       local settings = current_settings(ui)
       settings.scroll[hit.payload.route] = scrollbar.offsetFromY(hit.payload.metrics, y)
+      ui.dragging_scrollbar = { kind = "settings", route = hit.payload.route, metrics = hit.payload.metrics }
     elseif hit.id == "settings_theme" then ctx.settings_service.set("user.theme", hit.payload)
+    elseif hit.id == "settings_open_pictures" then
+      open_window(ui, "dock.files")
+      local active_id = ui.active or ctx.window_service.activeId().data
+      if active_id then ctx.explorer_service.navigate(active_id, paths.userFolder("default", "Pictures")) end
+    elseif hit.id == "settings_open_browser" then
+      open_window(ui, "dock.browser")
+    elseif hit.id == "settings_open_terminal" then
+      open_window(ui, "dock.terminal")
+    elseif hit.id == "settings_wallpaper_clear" then
+      set_wallpaper(ui, "")
     elseif hit.id == "settings_update_install" then ctx.update_service.installAvailable()
     elseif hit.id == "settings_login_toggle" then
       local required = ctx.user_service.loginRequired().data == true
@@ -2247,6 +2508,18 @@ function M.new(ctx)
         ctx.cloud_service.configure(form.server)
         ctx.cloud_service.avatarUrl(form.avatar)
       end
+    elseif hit.id == "terminal_input" then
+      local state = terminal_state(ui, hit.payload.window_id)
+      local id = focus_text_input(ui, "terminal_input", hit.payload.window_id, state.input or "", #tostring(state.input or ""))
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, CELL_W, false)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = "terminal_input", window_id = hit.payload.window_id, text_x = hit.payload.text_x, char_w = CELL_W }
+    elseif hit.id == "browser_address" then
+      local state = browser_state(ui, hit.payload.window_id)
+      local id = focus_text_input(ui, "browser_address", hit.payload.window_id, state.address or "", #tostring(state.address or ""))
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, CELL_W, false)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = "browser_address", window_id = hit.payload.window_id, text_x = hit.payload.text_x, char_w = CELL_W }
     elseif hit.id == "studio_new" then ctx.studio_service.newProject()
     elseif hit.id == "studio_save" then ctx.studio_service.save()
     elseif hit.id == "studio_export" then ctx.studio_service.exportApp(); ctx.app_service.scanApps()
@@ -2389,6 +2662,14 @@ function M.new(ctx)
           ctx.studio_service.insertScriptLine(next_line, "")
           focus_text_input(ui, "studio_code", input.window_id, "", 0, { line = next_line, scroll_x = 0 })
           return true
+        elseif input.kind == "terminal_input" then
+          local window_id = input.window_id
+          finish_text_input(ui, true)
+          focus_text_input(ui, "terminal_input", window_id, "", 0)
+          return true
+        elseif input.kind == "browser_address" then
+          finish_text_input(ui, true)
+          return true
         end
         finish_text_input(ui, true); return true
       end
@@ -2426,6 +2707,14 @@ function M.new(ctx)
           local next_line = ((input.extra and input.extra.line) or 1) + 1
           ctx.studio_service.insertScriptLine(next_line, "")
           focus_text_input(ui, "studio_code", input.window_id, "", 0, { line = next_line, scroll_x = 0 })
+          return true
+        elseif input.kind == "terminal_input" then
+          local window_id = input.window_id
+          finish_text_input(ui, true)
+          focus_text_input(ui, "terminal_input", window_id, "", 0)
+          return true
+        elseif input.kind == "browser_address" then
+          finish_text_input(ui, true)
           return true
         end
         finish_text_input(ui, true); return true
@@ -2474,7 +2763,7 @@ function M.new(ctx)
     local update = ctx.update_service and ctx.update_service.status().data
     local update_status = update and update.status or "idle"
     if ui.locked and (ui.frame or 0) < 28 then return true end
-    if ui.text_input ~= nil or update_status == "checking" or update_status == "installing" then return true end
+    if update_status == "checking" or update_status == "installing" then return true end
     for _, app in ipairs(ctx.app_service.listApps().data or {}) do
       local state = dock_state_for_app(ui, app.manifest.id)
       if state.loading or state.notify then return true end
@@ -2499,6 +2788,11 @@ function M.new(ctx)
     end
     local window = active_window(ui)
     if window and window.app_id == "dock.settings" then settings_scroll(ui, button); return true end
+    if window and window.app_id == "dock.terminal" then
+      local state = terminal_state(ui, window.id)
+      state.scroll = math.max(0, (tonumber(state.scroll) or 0) + (tonumber(button) or 0))
+      return true
+    end
     if window and window.app_id == "dock.studio" then
       if ui.modifiers.shift then ctx.studio_service.scrollPreview((button or 0) * 10, 0) else ctx.studio_service.scrollPreview(0, (button or 0) * 10) end
       return true
@@ -2586,7 +2880,10 @@ function M.new(ctx)
           ui.selecting = nil
           handle_action(ui, hit_at(ui, x, y), button, x, y)
         elseif mapped == "mouse_drag" then
-          if ui.dragging_text then
+          if ui.dragging_scrollbar and ui.dragging_scrollbar.kind == "settings" then
+            local settings = current_settings(ui)
+            settings.scroll[ui.dragging_scrollbar.route] = scrollbar.offsetFromY(ui.dragging_scrollbar.metrics, y)
+          elseif ui.dragging_text then
             ctx.text_input_service.cursorFromX(ui.dragging_text.input_id, x, ui.dragging_text.text_x, ui.dragging_text.char_w or CELL_W, true, ui.dragging_text.scroll_x or 0)
             sync_text_input(ui)
           elseif ui.dragging_studio then
@@ -2624,6 +2921,7 @@ function M.new(ctx)
           ui.dragging_studio = nil
           ui.dragging_file = nil
           ui.dragging_text = nil
+          ui.dragging_scrollbar = nil
           ui.selecting = nil
         elseif mapped == "mouse_scroll" then
           handle_scroll(ui, button, x, y)

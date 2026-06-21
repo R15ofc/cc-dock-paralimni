@@ -1,0 +1,13 @@
+{
+  "id": "dock.browser",
+  "name": "Luma",
+  "version": "0.2.0",
+  "entry": "main.lua",
+  "type": "system",
+  "category": "internet",
+  "icon": "browser",
+  "permissions": ["network.http", "settings.read", "settings.write"],
+  "file_associations": ["text/html", "application/luma-site"],
+  "autoload": false,
+  "desktop": true
+}
