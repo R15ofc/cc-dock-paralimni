@@ -23,6 +23,7 @@ function M.new()
     explorer_paste = true, explorer_trash = true, explorer_scroll_up = true, explorer_scroll_down = true,
     settings_back = true, settings_forward = true, settings_nav = true, settings_sub = true,
     settings_theme = true, settings_update_install = true, settings_login_toggle = true, settings_password_clear = true,
+    settings_cloud_register = true, settings_cloud_login = true, settings_cloud_logout = true, settings_cloud_avatar = true,
     studio_new = true, studio_save = true, studio_run = true, studio_export = true, studio_example = true, studio_icon = true, studio_insert = true, studio_field = true,
     studio_mode = true, studio_open_project = true, studio_tool = true, studio_duplicate = true, studio_delete = true,
     studio_resize = true, studio_code_panel = true,
@@ -30,7 +31,7 @@ function M.new()
     top_menu = true, window_close = true, window_min = true, window_full = true,
   }
 
-  local text_inputs = { login_password = true, explorer_search = true, explorer_rename = true, settings_password_field = true, studio_code_line = true, studio_prop_field = true }
+  local text_inputs = { login_password = true, explorer_search = true, explorer_rename = true, settings_password_field = true, settings_cloud_field = true, studio_code_line = true, studio_prop_field = true }
   local draggable = { window_drag = true, dock_app = true, studio_splitter = true, studio_component = true }
   local denied = { dock_divider = true }
 

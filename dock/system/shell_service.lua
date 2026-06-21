@@ -397,6 +397,8 @@ function M.new(ctx)
     safe_print("dock ipc send <pid> <type> <text> | ipc inbox <pid>")
     safe_print("dock explorer [go|back|up|search|select|rename|new-folder|new-file|copy|cut|paste|trash]")
     safe_print("dock update [check|status|install]")
+    safe_print("dock cloud [status|server <url>|register <user> <pass>|login <user> <pass>|logout|me|list]")
+    safe_print("dock cloud upload <local> [remote] | download <remote> [local] | delete <remote> | avatar-url <url>")
     safe_print("dock studio [new|list|open <id>|save|export|icon <name>|example <notify|counter|clicker>|add <text|button|input|shape|image>]")
     safe_print("dock run <app_id> | files | ls <path> | open <path>")
     safe_print("dock mkdir <path> | touch <path> | write <path> <text> | cat <path> | rm <path>")
@@ -493,6 +495,39 @@ function M.new(ctx)
       if not result.ok then return print_result(result) end
       safe_print("Update: " .. tostring(result.data.status))
       if result.data.available then safe_print(result.data.available.title) end
+      return result
+    elseif command == "cloud" then
+      if not ctx.cloud_service then return print_result({ ok = false, error = "Cloud service unavailable" }) end
+      local action = args[2] or "status"
+      local result
+      if action == "server" then result = ctx.cloud_service.configure(args[3] or "")
+      elseif action == "register" then result = ctx.cloud_service.register(args[3] or "", args[4] or "", join_words(args, 5) ~= "" and join_words(args, 5) or args[3])
+      elseif action == "login" then result = ctx.cloud_service.login(args[3] or "", args[4] or "")
+      elseif action == "logout" then result = ctx.cloud_service.logout()
+      elseif action == "me" then result = ctx.cloud_service.me()
+      elseif action == "list" then
+        result = ctx.cloud_service.list()
+        if result.ok then
+          safe_print("Cloud: " .. tostring(result.data.used_bytes or 0) .. "/" .. tostring(result.data.quota_bytes or 0) .. " bytes")
+          for _, item in ipairs(result.data.files or {}) do safe_print(tostring(item.path) .. "  " .. format_size(item.size or 0)) end
+        end
+      elseif action == "upload" then result = ctx.cloud_service.upload(args[3] or "", args[4] or args[3])
+      elseif action == "download" then result = ctx.cloud_service.download(args[3] or "", args[4] or args[3])
+      elseif action == "delete" then result = ctx.cloud_service.delete(args[3] or "")
+      elseif action == "avatar-url" then result = ctx.cloud_service.avatarUrl(args[3] or "")
+      else result = ctx.cloud_service.status() end
+      if not result.ok then return print_result(result) end
+      if action == "status" or action == "server" then
+        safe_print("Server: " .. tostring(result.data.server_url or ""))
+        safe_print("Signed in: " .. tostring(result.data.token_present == true))
+        if tostring(result.data.username or "") ~= "" then safe_print("User: " .. tostring(result.data.username)) end
+      elseif result.data and result.data.account then
+        safe_print("Account: " .. tostring(result.data.account.username or ""))
+        safe_print("Plan: " .. tostring(result.data.account.edition or "Basic"))
+        safe_print("Cloud: " .. format_size(result.data.account.used_bytes or 0) .. "/" .. format_size(result.data.account.quota_bytes or 0))
+      elseif result.data and result.data.path then
+        safe_print("Path: " .. tostring(result.data.path))
+      end
       return result
     elseif command == "studio" then
       local action = args[2] or "current"
@@ -788,6 +823,12 @@ function M.new(ctx)
     ui.settings.history = ui.settings.history or {}
     ui.settings.future = ui.settings.future or {}
     ui.settings.scroll = ui.settings.scroll or {}
+    local form = ui.settings.account_form or {}
+    if not form.server then form.server = tostring(ctx.settings_service.get("user.cloud.server_url", "http://127.0.0.1:8000").data or "") end
+    if not form.username then form.username = tostring(ctx.settings_service.get("user.cloud.username", "").data or "") end
+    if not form.password then form.password = "" end
+    if not form.avatar then form.avatar = "" end
+    ui.settings.account_form = form
     return ui.settings
   end
 
@@ -795,6 +836,7 @@ function M.new(ctx)
     local settings = current_settings(ui)
     route = tostring(route or "general")
     if route == "software_update" and ctx.update_service then ctx.update_service.beginCheck() end
+    if route == "account" and ctx.cloud_service and ctx.cloud_service.status().data.token_present then ctx.cloud_service.me() end
     if settings.route == route then return end
     table.insert(settings.history, settings.route)
     settings.route = route
@@ -808,6 +850,7 @@ function M.new(ctx)
     table.insert(settings.future, settings.route)
     settings.route = previous
     if settings.route == "software_update" and ctx.update_service then ctx.update_service.beginCheck() end
+    if settings.route == "account" and ctx.cloud_service and ctx.cloud_service.status().data.token_present then ctx.cloud_service.me() end
   end
 
   local function settings_forward(ui)
@@ -817,6 +860,7 @@ function M.new(ctx)
     table.insert(settings.history, settings.route)
     settings.route = next_route
     if settings.route == "software_update" and ctx.update_service then ctx.update_service.beginCheck() end
+    if settings.route == "account" and ctx.cloud_service and ctx.cloud_service.status().data.token_present then ctx.cloud_service.me() end
   end
 
   local function settings_scroll(ui, delta)
@@ -831,6 +875,7 @@ function M.new(ctx)
       software_update = "Software Update",
       devices = "Devices",
       accessibility = "Accessibility",
+      account = "Account",
       appearance = "Appearance",
       privacy_security = "Privacy & Security",
       about = "About",
@@ -1017,6 +1062,8 @@ function M.new(ctx)
       ctx.studio_service.setScriptLine(ui.text_input.extra.line, view.value)
     elseif ui.text_input.kind == "studio_prop" and ui.text_input.extra and ui.text_input.extra.field then
       ctx.studio_service.updateSelectedField(ui.text_input.extra.field, view.value)
+    elseif tostring(ui.text_input.kind or ""):match("^settings_cloud_") and ui.text_input.extra and ui.text_input.extra.field then
+      current_settings(ui).account_form[ui.text_input.extra.field] = view.value
     end
   end
 
@@ -1240,6 +1287,39 @@ function M.new(ctx)
     add_hit(ui, "settings_password_field", field_x, y, field_w, 14, { window_id = window.id, text_x = field_x + 5 })
   end
 
+  local function cloud_form(ui)
+    return current_settings(ui).account_form
+  end
+
+  local function draw_cloud_input(ui, window, x, y, width, field, label, secret)
+    local form = cloud_form(ui)
+    local value = tostring(form[field] or "")
+    local kind = "settings_cloud_" .. tostring(field)
+    local active = focused_input(ui, kind, window.id)
+    local field_x = x + math.max(48, math.floor(width * 0.32))
+    local field_w = math.max(44, width - (field_x - x))
+    local input_key = input_id(kind, window.id)
+    local shown_value = value
+    local cursor = #value
+    if active then
+      local view = input_view(input_key, value)
+      shown_value = tostring(view.value or "")
+      cursor = tonumber(view.cursor) or #shown_value
+    end
+    local chars = math.max(1, math.floor((field_w - 10) / CELL_W))
+    local visible_text = secret and string.rep("*", #shown_value) or shown_value
+    if visible_text == "" and not active then visible_text = field == "avatar" and "Image URL" or label end
+    draw_text(ui.gpu, x, y + 4, label, rgb(84, 88, 94), -1)
+    rect(ui.gpu, field_x, y, field_w, 14, rgb(246, 248, 251))
+    outline(ui.gpu, field_x, y, field_w, 14, active and COLORS.blue or rgb(190, 196, 205))
+    draw_text(ui.gpu, field_x + 5, y + 4, ellipsize(visible_text, chars), (shown_value ~= "" or active) and COLORS.black or rgb(116, 121, 128), -1)
+    if active then
+      local cursor_x = field_x + 5 + math.min(cursor, chars) * CELL_W
+      rect(ui.gpu, cursor_x, y + 2, 1, 10, COLORS.black)
+    end
+    add_hit(ui, "settings_cloud_field", field_x, y, field_w, 14, { window_id = window.id, field = field, kind = kind, text_x = field_x + 5 })
+  end
+
   local function draw_settings(ui, window, x, y, w, h)
     local content_x, content_y = x + 6, y + 21
     local content_w, content_h = w - 12, h - 28
@@ -1260,6 +1340,7 @@ function M.new(ctx)
 
     local sections = {
       { id = "general", label = "General" },
+      { id = "account", label = "Account" },
       { id = "accessibility", label = "Accessibility" },
       { id = "appearance", label = "Appearance" },
       { id = "privacy_security", label = "Privacy & Security" },
@@ -1320,6 +1401,38 @@ function M.new(ctx)
       local clear_y = body_y + card_h + 6
       if has_password and clear_y + 14 <= content_y + content_h then
         draw_settings_button(ui, "settings_password_clear", body_x, clear_y, math.min(92, body_w), 14, "Clear Password", nil, COLORS.red, COLORS.white)
+      end
+      return
+    elseif route == "account" then
+      local form = cloud_form(ui)
+      local status = ctx.cloud_service and ctx.cloud_service.status().data or {}
+      local account = status.account or {}
+      local card_h = 44
+      draw_settings_card(ui, body_x, body_y, body_w, card_h)
+      draw_text(ui.gpu, body_x + 10, body_y + 7, "Dock Cloud", COLORS.black, -1)
+      local signed_label = status.token_present and (tostring(account.username or status.username or "Signed in")) or "Signed out"
+      draw_settings_row(ui, "Status", signed_label, body_x + 10, body_y + 20, body_w - 20)
+      local quota = account.quota_bytes and (format_size(account.used_bytes or 0) .. "/" .. format_size(account.quota_bytes or 0)) or "-"
+      draw_settings_row(ui, "Cloud", quota, body_x + 10, body_y + 31, body_w - 20, false)
+      local field_y = body_y + card_h + 8
+      if field_y + 14 <= content_y + content_h - 5 then draw_cloud_input(ui, window, body_x, field_y, body_w, "server", "Server", false) end
+      if field_y + 31 <= content_y + content_h - 5 then draw_cloud_input(ui, window, body_x, field_y + 17, body_w, "username", "User", false) end
+      if field_y + 48 <= content_y + content_h - 5 then draw_cloud_input(ui, window, body_x, field_y + 34, body_w, "password", "Password", true) end
+      if field_y + 65 <= content_y + content_h - 5 then draw_cloud_input(ui, window, body_x, field_y + 51, body_w, "avatar", "Avatar", false) end
+      local button_y = field_y + 69
+      if button_y + 14 <= content_y + content_h - 4 then
+        local gap = 5
+        local bw = math.max(42, math.floor((body_w - gap * 2) / 3))
+        draw_settings_button(ui, "settings_cloud_register", body_x, button_y, bw, 14, "Register", nil, COLORS.blue, COLORS.white)
+        draw_settings_button(ui, "settings_cloud_login", body_x + bw + gap, button_y, bw, 14, "Login", nil, rgb(52, 145, 92), COLORS.white)
+        draw_settings_button(ui, "settings_cloud_logout", body_x + (bw + gap) * 2, button_y, math.max(34, body_w - (bw + gap) * 2), 14, "Logout", nil, rgb(198, 203, 212), COLORS.black)
+      end
+      local avatar_y = button_y + 18
+      if avatar_y + 14 <= content_y + content_h - 4 then
+        draw_settings_button(ui, "settings_cloud_avatar", body_x, avatar_y, math.min(104, body_w), 14, "Set Avatar URL", nil, rgb(226, 231, 238), COLORS.black)
+      end
+      if status.last_error and avatar_y + 31 <= content_y + content_h - 4 then
+        draw_text(ui.gpu, body_x, avatar_y + 20, ellipsize(status.last_error, math.floor(body_w / CELL_W)), COLORS.red, -1)
       end
       return
     end
@@ -1983,6 +2096,11 @@ function M.new(ctx)
       local view = ctx.text_input_service.view(input.input_id).data
       local value = tostring(view and view.value or "")
       if commit and value ~= "" then ctx.user_service.setPassword(value) end
+    elseif tostring(input.kind or ""):match("^settings_cloud_") and input.extra and input.extra.field then
+      local view = ctx.text_input_service.view(input.input_id).data
+      local value = tostring(view and view.value or "")
+      current_settings(ui).account_form[input.extra.field] = value
+      if commit and input.extra.field == "server" and ctx.cloud_service then ctx.cloud_service.configure(value) end
     end
     ui.text_input = nil
   end
@@ -2003,6 +2121,8 @@ function M.new(ctx)
     elseif ui.text_input and ui.text_input.kind == "studio_prop" and hit.id ~= "studio_prop_field" then
       finish_text_input(ui, true)
     elseif ui.text_input and ui.text_input.kind == "settings_password" and hit.id ~= "settings_password_field" then
+      finish_text_input(ui, true)
+    elseif ui.text_input and tostring(ui.text_input.kind or ""):match("^settings_cloud_") and hit.id ~= "settings_cloud_field" then
       finish_text_input(ui, true)
     end
     if hit.id == "system_menu" then ui.menu = not ui.menu; ui.context = nil
@@ -2094,6 +2214,39 @@ function M.new(ctx)
       local id = focus_text_input(ui, "settings_password", hit.payload.window_id, "", 0)
       ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, CELL_W, false)
       sync_text_input(ui)
+    elseif hit.id == "settings_cloud_field" then
+      local form = cloud_form(ui)
+      local value = tostring(form[hit.payload.field] or "")
+      local id = focus_text_input(ui, hit.payload.kind, hit.payload.window_id, value, #value, { field = hit.payload.field })
+      ctx.text_input_service.cursorFromX(id, x, hit.payload.text_x, CELL_W, false)
+      sync_text_input(ui)
+      ui.dragging_text = { input_id = id, kind = hit.payload.kind, window_id = hit.payload.window_id, text_x = hit.payload.text_x, char_w = CELL_W }
+    elseif hit.id == "settings_cloud_register" then
+      finish_text_input(ui, true)
+      local form = cloud_form(ui)
+      if ctx.cloud_service then
+        ctx.cloud_service.configure(form.server)
+        ctx.cloud_service.register(form.username, form.password, form.username)
+        form.password = ""
+      end
+    elseif hit.id == "settings_cloud_login" then
+      finish_text_input(ui, true)
+      local form = cloud_form(ui)
+      if ctx.cloud_service then
+        ctx.cloud_service.configure(form.server)
+        ctx.cloud_service.login(form.username, form.password)
+        form.password = ""
+      end
+    elseif hit.id == "settings_cloud_logout" then
+      finish_text_input(ui, true)
+      if ctx.cloud_service then ctx.cloud_service.logout() end
+    elseif hit.id == "settings_cloud_avatar" then
+      finish_text_input(ui, true)
+      local form = cloud_form(ui)
+      if ctx.cloud_service then
+        ctx.cloud_service.configure(form.server)
+        ctx.cloud_service.avatarUrl(form.avatar)
+      end
     elseif hit.id == "studio_new" then ctx.studio_service.newProject()
     elseif hit.id == "studio_save" then ctx.studio_service.save()
     elseif hit.id == "studio_export" then ctx.studio_service.exportApp(); ctx.app_service.scanApps()
