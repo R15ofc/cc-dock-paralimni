@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.2.1"
+local VERSION = _G.ROADROVER_VERSION or "2.3.0"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -105,6 +105,8 @@ local car = {
     port = nil,
     keyboardName = nil,
     keyboard = nil,
+    gpuName = nil,
+    gpu = nil,
     lastScan = -1e9,
     error = nil
   },
@@ -117,7 +119,28 @@ local car = {
   engineOn = false,
   pulseTimer = nil,
   cruiseOn = false,
-  driveMode = "normal"
+  driveMode = "normal",
+  hd = {
+    ready = false,
+    width = 384,
+    height = 192,
+    hits = {},
+    gpuName = nil
+  },
+  palette = {
+    background = 0x080B10,
+    surface = 0x121821,
+    surfaceRaised = 0x1B2430,
+    border = 0x344252,
+    text = 0xF4F7FA,
+    muted = 0x8C9AA8,
+    blue = 0x2F81F7,
+    cyan = 0x31C6E7,
+    green = 0x36C978,
+    yellow = 0xF4C44E,
+    orange = 0xF38B3C,
+    red = 0xEF4B5A
+  }
 }
 local timerResetRequested = false
 
@@ -646,6 +669,7 @@ function car.peripheralType(name)
   if not peripheral or not peripheral.getType then return "" end
   local ok, kind = pcall(peripheral.getType, name)
   if not ok then return "" end
+  if type(kind) == "table" then return table.concat(kind, ","):lower() end
   return tostring(kind or ""):lower()
 end
 
@@ -666,6 +690,7 @@ function car.scanDevices(force)
   local previousPortName = car.devices.portName
   car.devices.portName, car.devices.port = nil, nil
   car.devices.keyboardName, car.devices.keyboard = nil, nil
+  car.devices.gpuName, car.devices.gpu = nil, nil
   if not peripheral or not peripheral.getNames then return end
   local ok, names = pcall(peripheral.getNames)
   if not ok or type(names) ~= "table" then return end
@@ -679,6 +704,9 @@ function car.scanDevices(force)
       end
       if not car.devices.keyboard and (kind:find("tm_keyboard", 1, true) or type(device.setFireNativeEvents) == "function") then
         car.devices.keyboardName, car.devices.keyboard = name, device
+      end
+      if not car.devices.gpu and (kind:find("tm_gpu", 1, true) or (type(device.getSize) == "function" and type(device.sync) == "function" and type(device.filledRectangle) == "function")) then
+        car.devices.gpuName, car.devices.gpu = name, device
       end
     end
   end
@@ -2382,9 +2410,320 @@ local function drawRight()
 end
 
 redraw = function()
+  if car.drawHD and car.drawHD() then return end
   drawLeft()
   drawCenter()
   drawRight()
+end
+
+function car.setupHD(force)
+  local gpu = car.devices.gpu
+  if not gpu then
+    car.hd.ready = false
+    car.hd.gpuName = nil
+    return false
+  end
+  if not force and car.hd.ready and car.hd.gpuName == car.devices.gpuName then return true end
+  local ok = pcall(function()
+    if gpu.refreshSize then gpu.refreshSize() end
+    if gpu.setSize then gpu.setSize(64) end
+  end)
+  if not ok then
+    car.hd.ready = false
+    return false
+  end
+  if sleep then pcall(sleep, 0) end
+  if gpu.getSize then
+    local sizeOK, width, height = pcall(gpu.getSize)
+    if sizeOK and tonumber(width) and tonumber(height) then
+      car.hd.width = math.max(160, math.floor(width))
+      car.hd.height = math.max(96, math.floor(height))
+    end
+  end
+  car.hd.gpuName = car.devices.gpuName
+  car.hd.ready = type(gpu.filledRectangle) == "function" and type(gpu.drawText) == "function"
+  return car.hd.ready
+end
+
+function car.hdFill(x, y, width, height, color)
+  local gpu = car.devices.gpu
+  if not gpu or not gpu.filledRectangle then return false end
+  x = math.max(1, math.floor(tonumber(x) or 1))
+  y = math.max(1, math.floor(tonumber(y) or 1))
+  width = math.min(math.floor(tonumber(width) or 0), car.hd.width - x + 1)
+  height = math.min(math.floor(tonumber(height) or 0), car.hd.height - y + 1)
+  if width <= 0 or height <= 0 then return false end
+  return pcall(gpu.filledRectangle, x, y, width, height, color)
+end
+
+function car.hdRound(x, y, width, height, radius, color)
+  radius = math.max(0, math.min(math.floor(radius or 0), math.floor(math.min(width, height) / 2)))
+  if radius <= 1 then return car.hdFill(x, y, width, height, color) end
+  car.hdFill(x + radius, y, width - radius * 2, height, color)
+  car.hdFill(x, y + radius, width, height - radius * 2, color)
+  for offset = 0, radius - 1 do
+    local inset = math.floor((radius - offset) * 0.58)
+    car.hdFill(x + inset, y + offset, width - inset * 2, 1, color)
+    car.hdFill(x + inset, y + height - offset - 1, width - inset * 2, 1, color)
+  end
+end
+
+function car.hdOutline(x, y, width, height, color)
+  car.hdFill(x + 4, y, width - 8, 1, color)
+  car.hdFill(x + 4, y + height - 1, width - 8, 1, color)
+  car.hdFill(x, y + 4, 1, height - 8, color)
+  car.hdFill(x + width - 1, y + 4, 1, height - 8, color)
+  car.hdFill(x + 1, y + 2, 2, 1, color)
+  car.hdFill(x + width - 3, y + 2, 2, 1, color)
+  car.hdFill(x + 1, y + height - 3, 2, 1, color)
+  car.hdFill(x + width - 3, y + height - 3, 2, 1, color)
+end
+
+function car.hdText(x, y, text, color, scale, background)
+  local gpu = car.devices.gpu
+  if not gpu or not gpu.drawText then return false end
+  text = tostring(text or "")
+  scale = math.max(1, math.floor(tonumber(scale) or 1))
+  local ok = pcall(gpu.drawText, math.floor(x), math.floor(y), text, color or car.palette.text, background or -1, scale, 0)
+  if not ok then ok = pcall(gpu.drawText, math.floor(x), math.floor(y), text, color or car.palette.text, background or -1, scale) end
+  if not ok then ok = pcall(gpu.drawText, math.floor(x), math.floor(y), text, color or car.palette.text, background or -1) end
+  return ok
+end
+
+function car.hdTextWidth(text, scale)
+  return #tostring(text or "") * 6 * math.max(1, math.floor(tonumber(scale) or 1))
+end
+
+function car.hdCenteredText(x, y, width, text, color, scale)
+  car.hdText(x + math.floor((width - car.hdTextWidth(text, scale)) / 2), y, text, color, scale)
+end
+
+function car.hdHit(id, x, y, width, height)
+  car.hd.hits[#car.hd.hits + 1] = { id = id, x = x, y = y, w = width, h = height }
+end
+
+function car.hdButton(id, x, y, width, height, label, sublabel, active, accent)
+  accent = accent or car.palette.blue
+  local background = active and accent or car.palette.surfaceRaised
+  car.hdRound(x, y, width, height, 5, background)
+  if not active then car.hdOutline(x, y, width, height, car.palette.border) end
+  local labelY = sublabel and (y + math.max(4, math.floor(height / 2) - 8)) or (y + math.floor((height - 9) / 2))
+  car.hdCenteredText(x, labelY, width, tostring(label or ""), active and car.palette.background or car.palette.text, 1)
+  if sublabel then
+    car.hdCenteredText(x, labelY + 10, width, tostring(sublabel), active and car.palette.background or car.palette.muted, 1)
+  end
+  if id then car.hdHit(id, x, y, width, height) end
+end
+
+function car.hdSpeed()
+  local kmh = speedBps * 3.6
+  if settings.units == "MP/H" then return kmh * 0.621371, "MPH" end
+  if settings.units == "B/S" then return speedBps, "B/S" end
+  return kmh, "KM/H"
+end
+
+function car.drawHDNav(navX, top, width, height)
+  local items = {
+    { "HOME", 1 },
+    { "DRIVE", 2 },
+    { "STATS", 4 },
+    { "SET", 3 },
+    { "ABOUT", 6 }
+  }
+  local gap = 4
+  local itemH = math.floor((height - gap * (#items - 1)) / #items)
+  for i = 1, #items do
+    local y = top + (i - 1) * (itemH + gap)
+    car.hdButton("tab:" .. tostring(items[i][2]), navX, y, width, itemH, items[i][1], nil, activeTab == items[i][2], car.palette.blue)
+  end
+end
+
+function car.drawHDHome(x, y, width, height)
+  local speedW = math.max(88, math.floor(width * 0.32))
+  local gap = 8
+  local mainX = x + speedW + gap
+  local mainW = width - speedW - gap
+  car.hdRound(x, y, speedW, height, 7, car.palette.surface)
+  car.hdText(x + 10, y + 9, "SPEED", car.palette.muted, 1)
+  local speed, unit = car.hdSpeed()
+  local speedText = tostring(math.floor(speed + 0.5))
+  local speedScale = #speedText <= 2 and 4 or 3
+  car.hdCenteredText(x, y + 42, speedW, speedText, car.palette.text, speedScale)
+  car.hdCenteredText(x, y + 84, speedW, unit, car.palette.muted, 1)
+  local gear = car.state.reverse and "R" or (car.state.clutch and "D" or "P")
+  car.hdCenteredText(x, y + height - 41, speedW, gear, car.state.reverse and car.palette.orange or car.palette.green, 3)
+
+  local modeGap = 4
+  local modeW = math.floor((mainW - modeGap * 2) / 3)
+  car.hdButton("control:standard", mainX, y, modeW, 28, "STANDARD", nil, car.state.mode == "standard", car.palette.blue)
+  car.hdButton("control:sport", mainX + modeW + modeGap, y, modeW, 28, "SPORT", nil, car.state.mode == "sport", car.palette.orange)
+  car.hdButton("control:sport_plus", mainX + (modeW + modeGap) * 2, y, mainW - (modeW + modeGap) * 2, 28, "SPORT+", nil, car.state.mode == "sport_plus", car.palette.red)
+
+  local statusY = y + 34
+  car.hdRound(mainX, statusY, mainW, 32, 5, car.palette.surface)
+  car.hdText(mainX + 9, statusY + 6, car.state.driveEngineOff and "ENGINE OFF" or "ENGINE READY", car.state.driveEngineOff and car.palette.red or car.palette.green, 1)
+  car.hdText(mainX + 9, statusY + 17, car.state.frontDriveOff and "FRONT DRIVE OFF" or "ALL WHEEL DRIVE", car.palette.muted, 1)
+  car.hdText(mainX + mainW - 54, statusY + 11, car.state.clutch and "CLUTCH" or "IDLE", car.state.clutch and car.palette.green or car.palette.muted, 1)
+
+  local controlsY = statusY + 38
+  local controlsGap = 5
+  local controlW = math.floor((mainW - controlsGap * 2) / 3)
+  local controlH = math.floor((height - (controlsY - y) - controlsGap) / 2)
+  car.hdButton("control:drive_engine", mainX, controlsY, controlW, controlH, "ENGINE", car.state.driveEngineOff and "OFF" or "ON", not car.state.driveEngineOff, car.palette.green)
+  car.hdButton("control:clutch", mainX + controlW + controlsGap, controlsY, controlW, controlH, "CLUTCH", "W / S", car.state.clutch, car.palette.green)
+  car.hdButton("control:reverse", mainX + (controlW + controlsGap) * 2, controlsY, mainW - (controlW + controlsGap) * 2, controlH, "REVERSE", "S", car.state.reverse, car.palette.orange)
+  local secondY = controlsY + controlH + controlsGap
+  car.hdButton("control:headlights", mainX, secondY, controlW, height - (secondY - y), "LIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan)
+  car.hdButton("control:right", mainX + controlW + controlsGap, secondY, controlW, height - (secondY - y), "SIGNAL", "Z", car.state.lighting == "right", car.palette.yellow)
+  car.hdButton("control:hazard", mainX + (controlW + controlsGap) * 2, secondY, mainW - (controlW + controlsGap) * 2, height - (secondY - y), "HAZARD", "X", car.state.lighting == "hazard", car.palette.red)
+end
+
+function car.drawHDDrive(x, y, width, height)
+  local controls = {
+    { "standard", "STANDARD", "MODE", car.state.mode == "standard", car.palette.blue },
+    { "sport", "SPORT", "MODE", car.state.mode == "sport", car.palette.orange },
+    { "sport_plus", "SPORT+", "MODE", car.state.mode == "sport_plus", car.palette.red },
+    { "clutch", "CLUTCH", "W / S", car.state.clutch, car.palette.green },
+    { "reverse", "REVERSE", "S", car.state.reverse, car.palette.orange },
+    { "front_drive", "FRONT DRIVE", car.state.frontDriveOff and "OFF" or "ON", car.state.frontDriveOff, car.palette.red },
+    { "drive_engine", "DRIVE ENGINE", car.state.driveEngineOff and "OFF" or "ON", car.state.driveEngineOff, car.palette.red },
+    { "work_engine", "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, car.palette.red },
+    { "boost", "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, car.palette.orange },
+    { "headlights", "HEADLIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan },
+    { "left", "LEFT SIGNAL", "TOUCH", car.state.lighting == "left", car.palette.yellow },
+    { "right", "RIGHT SIGNAL", "Z", car.state.lighting == "right", car.palette.yellow },
+    { "hazard", "HAZARD", "X", car.state.lighting == "hazard", car.palette.red },
+    { "heading", "PORT HEADING", car.state.portHeading:upper(), false, car.palette.blue },
+    { nil, "PORT", car.devices.portName and "CONNECTED" or "MISSING", car.devices.portName ~= nil, car.palette.green }
+  }
+  local cols, rows, gap = 3, 5, 5
+  local buttonW = math.floor((width - gap * (cols - 1)) / cols)
+  local buttonH = math.floor((height - gap * (rows - 1)) / rows)
+  for i = 1, #controls do
+    local col = (i - 1) % cols
+    local row = math.floor((i - 1) / cols)
+    local control = controls[i]
+    car.hdButton(control[1] and ("control:" .. control[1]) or nil, x + col * (buttonW + gap), y + row * (buttonH + gap), col == cols - 1 and width - col * (buttonW + gap) or buttonW, buttonH, control[2], control[3], control[4], control[5])
+  end
+end
+
+function car.drawHDStats(x, y, width, height)
+  local speed, unit = car.hdSpeed()
+  local cards = {
+    { "CURRENT SPEED", fmt(speed, 1) .. " " .. unit, car.palette.cyan },
+    { "MAX SPEED", fmt((stats.maxBps or 0) * 3.6, 1) .. " KM/H", car.palette.orange },
+    { "ODOMETER", fmt(stats.odometer or 0, 1) .. " BLOCKS", car.palette.green },
+    { "DRIVE TIME", fmtTime(stats.movingTime or 0), car.palette.blue }
+  }
+  local gap = 8
+  local cardW = math.floor((width - gap) / 2)
+  local cardH = math.floor((height - gap) / 2)
+  for i = 1, #cards do
+    local col = (i - 1) % 2
+    local row = math.floor((i - 1) / 2)
+    local cardX = x + col * (cardW + gap)
+    local cardY = y + row * (cardH + gap)
+    local actualW = col == 1 and width - cardW - gap or cardW
+    car.hdRound(cardX, cardY, actualW, cardH, 7, car.palette.surface)
+    car.hdText(cardX + 10, cardY + 10, cards[i][1], car.palette.muted, 1)
+    car.hdText(cardX + 10, cardY + 33, cards[i][2], cards[i][3], 2)
+  end
+end
+
+function car.drawHDSettings(x, y, width, height)
+  local gap = 8
+  local rowH = math.floor((height - gap * 3) / 4)
+  car.hdButton("setting:units", x, y, width, rowH, "SPEED UNITS", settings.units, true, car.palette.blue)
+  car.hdButton("setting:smooth", x, y + rowH + gap, width, rowH, "SPEED FILTER", settings.smoothEnabled and "ON" or "OFF", settings.smoothEnabled, car.palette.green)
+  car.hdButton("control:heading", x, y + (rowH + gap) * 2, width, rowH, "PORT HEADING", car.state.portHeading:upper(), true, car.palette.orange)
+  local status = (car.devices.keyboardName and "KEYBOARD READY" or "KEYBOARD MISSING") .. "  |  " .. (car.devices.portName and "REDSTONE READY" or "REDSTONE MISSING")
+  car.hdButton(nil, x, y + (rowH + gap) * 3, width, height - (rowH + gap) * 3, "HARDWARE", status, car.devices.keyboardName ~= nil and car.devices.portName ~= nil, car.palette.green)
+end
+
+function car.drawHDAbout(x, y, width, height)
+  car.hdRound(x, y, width, height, 7, car.palette.surface)
+  car.hdCenteredText(x, y + 24, width, "ROADROVER OS", car.palette.text, 3)
+  car.hdCenteredText(x, y + 58, width, "VERSION " .. VERSION, car.palette.blue, 1)
+  car.hdCenteredText(x, y + 82, width, "HD VEHICLE CONTROL SYSTEM", car.palette.muted, 1)
+  car.hdCenteredText(x, y + 105, width, tostring(car.hd.width) .. " x " .. tostring(car.hd.height), car.palette.muted, 1)
+  car.hdCenteredText(x, y + height - 24, width, displayUserName(), car.palette.text, 1)
+end
+
+function car.drawHD()
+  if not car.setupHD(false) then return false end
+  local gpu = car.devices.gpu
+  local width, height = car.hd.width, car.hd.height
+  car.hd.hits = {}
+  if gpu.fill then
+    pcall(gpu.fill, car.palette.background)
+  else
+    car.hdFill(1, 1, width, height, car.palette.background)
+  end
+  car.hdFill(1, 1, width, 24, car.palette.surface)
+  car.hdText(9, 8, "ROADROVER", car.palette.text, 1)
+  local modeLabel = car.state.mode == "sport_plus" and "SPORT+" or car.state.mode:upper()
+  car.hdText(86, 8, modeLabel, car.state.mode == "standard" and car.palette.blue or car.palette.orange, 1)
+  local timeText = os.date("%H:%M")
+  car.hdText(width - car.hdTextWidth(timeText, 1) - 9, 8, timeText, car.palette.text, 1)
+
+  local margin = 8
+  local navW = math.max(58, math.floor(width * 0.17))
+  local navX = width - navW - margin + 1
+  local contentY = 32
+  local contentH = height - contentY - margin + 1
+  local contentW = navX - margin - 7
+  car.drawHDNav(navX, contentY, navW, contentH)
+  local tabId = tabs[activeTab] and tabs[activeTab].id or "home"
+  if tabId == "home" then
+    car.drawHDHome(margin, contentY, contentW, contentH)
+  elseif tabId == "drive" then
+    car.drawHDDrive(margin, contentY, contentW, contentH)
+  elseif tabId == "stats" then
+    car.drawHDStats(margin, contentY, contentW, contentH)
+  elseif tabId == "settings" then
+    car.drawHDSettings(margin, contentY, contentW, contentH)
+  else
+    car.drawHDAbout(margin, contentY, contentW, contentH)
+  end
+  if gpu.sync then pcall(gpu.sync) end
+  return true
+end
+
+function car.handleHDClick(x, y)
+  x, y = tonumber(x), tonumber(y)
+  if not x or not y then return false end
+  for i = #car.hd.hits, 1, -1 do
+    local target = car.hd.hits[i]
+    if x >= target.x and x <= target.x + target.w - 1 and y >= target.y and y <= target.y + target.h - 1 then
+      if target.id:sub(1, 4) == "tab:" then
+        activeTab = tonumber(target.id:sub(5)) or activeTab
+        tabPage = (tabs[activeTab] and tabs[activeTab].page) or tabPage
+      elseif target.id:sub(1, 8) == "control:" then
+        car.handleDriveControl(target.id:sub(9))
+      elseif target.id == "setting:units" then
+        if settings.units == "KM/H" then settings.units = "MP/H"
+        elseif settings.units == "MP/H" then settings.units = "B/S"
+        else settings.units = "KM/H" end
+        saveUserSettings()
+      elseif target.id == "setting:smooth" then
+        settings.smoothEnabled = not settings.smoothEnabled
+        saveUserSettings()
+      end
+      return true
+    end
+  end
+  return false
+end
+
+function car.hdEvent(event, a, b, c, d)
+  if event ~= "tm_monitor_mouse_click" and event ~= "tm_monitor_touch" then return false end
+  local x, y
+  if type(a) == "number" and type(b) == "number" then
+    x, y = a, b
+  else
+    x, y = b, c
+  end
+  return car.handleHDClick(x, y)
 end
 
 local function hit(b, x, y)
@@ -2704,6 +3043,8 @@ local function drawCrash(err)
 end
 
 local function main()
+  car.scanDevices(true)
+  car.setupHD(true)
   rebuildUI()
   ensureProfile()
   rebuildUI()
@@ -2716,7 +3057,7 @@ local function main()
       timer = os.startTimer(TICK)
       timerResetRequested = false
     end
-    local ev, a, b, c = os.pullEvent()
+    local ev, a, b, c, d = os.pullEvent()
 
     if ev == "timer" and a == timer then
       pcall(tick)
@@ -2725,6 +3066,9 @@ local function main()
       timer = os.startTimer(TICK)
     elseif ev == "timer" and car.pulseTimer and a == car.pulseTimer then
       car.stopPulse()
+
+    elseif ev == "tm_monitor_mouse_click" or ev == "tm_monitor_touch" then
+      if car.hdEvent(ev, a, b, c, d) then redraw() end
 
     elseif ev == "monitor_touch" then
       local mx, my = b, c
@@ -2752,11 +3096,13 @@ local function main()
 
     elseif ev == "peripheral" or ev == "peripheral_detach" then
       car.scanDevices(true)
+      car.setupHD(true)
       car.applyOutputs()
       rebuildUI()
       redraw()
 
-    elseif ev == "term_resize" or ev == "monitor_resize" then
+    elseif ev == "term_resize" or ev == "monitor_resize" or ev == "tm_monitor_resize" then
+      car.setupHD(true)
       rebuildUI()
       redraw()
     end
