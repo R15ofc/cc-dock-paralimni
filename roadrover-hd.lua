@@ -462,12 +462,25 @@ return function(car, context)
   function car.drawHDError(message)
     if not car.devices.gpu or not car.hd.width or not car.hd.height then return false end
     fillPixels(1, 1, car.hd.width, car.hd.height, 0xF0F0F0)
-    local text = tostring(message or car.hd.error or "Display error"):gsub("[\r\n]+", " ")
+    local text = tostring(message or car.hd.error or "Display error"):gsub("\r", "")
     local title = "ROADROVER OS"
     local titleWidth = textLength(title)
-    local bodyWidth = math.min(textLength(text), car.hd.width - 12)
     drawTextPixels(math.max(1, math.floor((car.hd.width - titleWidth) / 2) + 1), math.max(1, math.floor(car.hd.height / 2) - 12), title, 0x111111, titleWidth)
-    drawTextPixels(math.max(1, math.floor((car.hd.width - bodyWidth) / 2) + 1), math.max(1, math.floor(car.hd.height / 2) + 4), text, 0xCC4C4C, bodyWidth)
+    local maxWidth = math.max(8, car.hd.width - 12)
+    local maxChars = math.max(8, math.floor(maxWidth / math.max(1, terminalState.cellWidth)))
+    local lines = {}
+    for sourceLine in (text .. "\n"):gmatch("(.-)\n") do
+      local offset = 1
+      repeat
+        lines[#lines + 1] = sourceLine:sub(offset, offset + maxChars - 1)
+        offset = offset + maxChars
+      until offset > #sourceLine or #lines >= 6
+      if #lines >= 6 then break end
+    end
+    local startY = math.max(1, math.floor(car.hd.height / 2) + 4)
+    for index = 1, #lines do
+      drawTextPixels(7, startY + (index - 1) * terminalState.cellHeight, lines[index], 0xCC4C4C, maxWidth)
+    end
     if car.devices.gpu.sync then pcall(car.devices.gpu.sync) end
     return true
   end

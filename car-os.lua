@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.4"
+local VERSION = _G.ROADROVER_VERSION or "2.7.5"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -143,6 +143,8 @@ local car = {
     error = nil,
     notice = nil,
     portName = nil,
+    serverVersion = nil,
+    errorDetail = nil,
     logSignature = nil,
     cacheLoaded = false,
     cacheSignature = nil,
@@ -1355,6 +1357,7 @@ function car.updateMap(force)
       or (car.devices.portName and ("Road map API unavailable on " .. tostring(car.devices.portName))
         or "Redstone Port not connected")
     car.map.notice = nil
+    car.map.errorDetail = car.map.error
     car.writeMapDiagnostic("peripheral-unavailable", car.map.error, portName)
     return car.ensureMapFallback()
   end
@@ -1362,11 +1365,22 @@ function car.updateMap(force)
   local now = os.clock()
   if not force and now - car.map.lastUpdate < 2 then return true end
   car.map.lastUpdate = now
+  if not car.map.serverVersion then
+    local infoOK, info = car.callTelemetry("getTweakedTweaksInfo")
+    if infoOK and type(info) == "table" then car.map.serverVersion = tostring(info.version or "") end
+  end
   local scanOK, scan, scanPortName = car.callTelemetry("scanRoad", 24)
   if not scanOK or type(scan) ~= "table" or scan.available ~= true then
-    car.map.error = tostring((type(scan) == "table" and scan.error) or scan or "Road scan failed")
+    local rawError = tostring((type(scan) == "table" and scan.error) or scan or "Road scan failed")
+    car.map.errorDetail = rawError
+    if rawError:find("ClientLevel", 1, true) and rawError:find("DEDICATED_SERVER", 1, true) then
+      local version = car.map.serverVersion and car.map.serverVersion ~= "" and car.map.serverVersion or "old"
+      car.map.error = "SERVER MOD " .. version .. " MUST BE UPDATED"
+    else
+      car.map.error = rawError
+    end
     car.map.notice = nil
-    car.writeMapDiagnostic("scan-failed", car.map.error, scanPortName or portName)
+    car.writeMapDiagnostic("scan-failed", rawError, scanPortName or portName)
     return car.ensureMapFallback()
   end
   car.map.scan = scan
@@ -1387,6 +1401,7 @@ function car.updateMap(force)
     samples = type(scan.samples) == "table" and scan.samples or {}
   }
   car.map.error = nil
+  car.map.errorDetail = nil
   car.map.notice = "LOCAL SCAN"
   if (port and type(port.getRoadMap) == "function") or (portName and car.hasMethod(portName, "getRoadMap")) then
     local viewOK, view = car.callTelemetry("getRoadMap", centerX, centerZ, radius, step)
@@ -3675,6 +3690,18 @@ function car.drawMap(y0)
     centerText(centerWin, math.floor((mapY1 + mapY2) / 2), "Map unavailable", layout.centerW, colors.red, colors.lightGray)
   end
 
+  if car.map.errorDetail then
+    local detail = safe(car.map.errorDetail)
+    local width = math.max(1, mapX2 - mapX1 + 1)
+    local maxLines = math.max(1, math.min(4, mapY2 - mapY1 + 1))
+    fillRect(centerWin, mapX1, mapY1, width, maxLines, colors.red)
+    for line = 1, maxLines do
+      local first = (line - 1) * width + 1
+      if first > #detail then break end
+      writeAt(centerWin, mapX1, mapY1 + line - 1, detail:sub(first, first + width - 1), colors.white, colors.red)
+    end
+  end
+
   local controls = {
     { "zoom_out", "-" }, { "zoom_in", "+" }, { "pan_left", "<" }, { "pan_right", ">" },
     { "pan_up", "^" }, { "pan_down", "v" }, { "recenter", "C" }, { "autopilot", car.autopilot.enabled and "STOP" or "AUTO" }
@@ -4218,8 +4245,8 @@ end
 
 function car.updateHardware()
   car.scanDevices(false)
-  pcall(car.updateMap, false)
-  pcall(car.updateAutopilot)
+  car.updateMap(false)
+  car.updateAutopilot()
   local now = os.clock()
   if car.pointer.down and now - car.pointer.lastSeen > 0.8 then
     car.pointer.down = false
@@ -4335,19 +4362,20 @@ local function drawCrash(err)
   term.setTextColor(themeColor(colors.white))
   term.clear()
 
-  local msg1 = "We're sorry for the inconvenience."
-  local msg2 = "Please try again later."
-
-  local y = math.floor(h / 2) - 1
-  term.setCursorPos(math.max(1, math.floor((w - #msg1) / 2) + 1), y)
-  term.write(msg1)
-  term.setCursorPos(math.max(1, math.floor((w - #msg2) / 2) + 1), y + 1)
-  term.write(msg2)
-
-  if err and err ~= "" then
-    local e = trim(tostring(err), w)
-    term.setCursorPos(1, h)
-    term.write(e)
+  term.setCursorPos(1, 1)
+  term.write(trim("RoadRover OS " .. VERSION .. " stopped", w))
+  term.setTextColor(themeColor(colors.red))
+  local message = tostring(err or "Unknown error"):gsub("\r", "")
+  local row = 3
+  for sourceLine in (message .. "\n"):gmatch("(.-)\n") do
+    local offset = 1
+    repeat
+      term.setCursorPos(1, row)
+      term.write(sourceLine:sub(offset, offset + w - 1))
+      offset = offset + w
+      row = row + 1
+    until offset > #sourceLine or row > h
+    if row > h then break end
   end
 
   if car.flushHD then car.flushHD() end
@@ -4397,8 +4425,8 @@ local function main()
     local ev, a, b, c, d = os.pullEvent()
 
     if ev == "timer" and a == timer then
-      pcall(tick)
-      pcall(car.updateHardware)
+      tick()
+      car.updateHardware()
       redraw()
       timer = os.startTimer(TICK)
     elseif ev == "timer" and car.pulseTimer and a == car.pulseTimer then
