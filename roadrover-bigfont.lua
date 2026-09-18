@@ -32,11 +32,18 @@ local function glyph(character)
 end
 
 local function sourcePixel(pattern, pixelX, pixelY)
-  if pixelX < 1 or pixelX > 6 or pixelY < 1 or pixelY > 10 then return false end
-  local sourceX = math.floor((pixelX - 1) / 2) + 1
-  local sourceY = math.floor((pixelY - 1) / 2) + 1
-  local index = (sourceY - 1) * 3 + sourceX
-  return pattern:sub(index, index) == "1"
+  if pixelX < 1 or pixelX > 6 or pixelY < 1 or pixelY > 12 then return false end
+  local sourceX = math.floor((pixelX - 1) * 4 / 6) + 1
+  local sourceY = math.floor((pixelY - 1) * 6 / 12) + 1
+  if type(pattern) == "table" then
+    local row = pattern[sourceY]
+    return type(row) == "string" and row:sub(sourceX, sourceX) == "1"
+  end
+  if type(pattern) == "string" then
+    local index = (sourceY - 1) * 4 + sourceX
+    return pattern:sub(index, index) == "1"
+  end
+  return false
 end
 
 local function encodeCell(pattern, cellX, cellY, foreground, background)
