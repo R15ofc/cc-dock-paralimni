@@ -10,13 +10,15 @@ end
 local SCRIPT_DIR = getScriptDir()
 local BASE_DIR = _G.ROADROVER_BASE_DIR or (SCRIPT_DIR ~= "" and SCRIPT_DIR or ".")
 local RRID_FILE = fs.combine(BASE_DIR, "system/rrid.txt")
+local MAP_LOG_PATH = fs.combine(BASE_DIR, "roadrover-map.log")
+local MAP_CACHE_PATH = fs.combine(BASE_DIR, "system/road-map-cache.json")
 local BASE_ENGINE_SIDE = _G.ENGINE_SIDE or "bottom"
 local BASE_DRIVE_SIDE = _G.DRIVE_SIDE or "left"
 local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.3"
+local VERSION = _G.ROADROVER_VERSION or "2.7.4"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -140,6 +142,11 @@ local car = {
     destination = nil,
     error = nil,
     notice = nil,
+    portName = nil,
+    logSignature = nil,
+    cacheLoaded = false,
+    cacheSignature = nil,
+    lastCacheSave = -1e9,
     lastUpdate = -1e9,
     lastRoute = -1e9,
     viewport = nil,
@@ -1161,17 +1168,141 @@ end
 
 function car.telemetryPort()
   local port = car.devices.port
-  if port and type(port.scanRoad) == "function" then return port end
+  if port and type(port.scanRoad) == "function" then return port, car.devices.portName end
+  if car.devices.portName and car.hasMethod(car.devices.portName, "scanRoad") then
+    return port, car.devices.portName
+  end
   if peripheral and type(peripheral.getNames) == "function" then
     local ok, names = pcall(peripheral.getNames)
     if ok and type(names) == "table" then
       for index = 1, #names do
         local wrapped = peripheral.wrap(names[index])
-        if wrapped and type(wrapped.scanRoad) == "function" then return wrapped end
+        if wrapped and type(wrapped.scanRoad) == "function" then return wrapped, names[index] end
+        if car.hasMethod(names[index], "scanRoad") then return wrapped, names[index] end
       end
     end
   end
   return nil
+end
+
+function car.loadMapCache()
+  if car.map.cacheLoaded then return car.map.view ~= nil end
+  car.map.cacheLoaded = true
+  local cached = readJson(MAP_CACHE_PATH)
+  if type(cached) ~= "table" or cached.available ~= true or type(cached.samples) ~= "table" then return false end
+  car.map.view = cached
+  car.map.notice = "CACHED MAP"
+  return true
+end
+
+function car.saveMapCache(view)
+  if type(view) ~= "table" or view.available ~= true or type(view.samples) ~= "table" then return false end
+  local center = view.center or {}
+  local signature = table.concat({
+    tostring(math.floor(tonumber(center.x) or 0)),
+    tostring(math.floor(tonumber(center.z) or 0)),
+    tostring(view.radius or ""),
+    tostring(view.step or ""),
+    tostring(view.sharedCells or ""),
+    tostring(#view.samples)
+  }, ":")
+  local now = os.clock()
+  if signature == car.map.cacheSignature or now - car.map.lastCacheSave < 20 then return false end
+  car.map.cacheSignature = signature
+  car.map.lastCacheSave = now
+  mkdirp(fs.getDir(MAP_CACHE_PATH))
+  return writeJson(MAP_CACHE_PATH, view)
+end
+
+function car.ensureMapFallback()
+  if car.map.view then return true end
+  if car.loadMapCache() then return true end
+  local position = curPos or car.vehicleWorldPosition()
+  if type(position) ~= "table" then return false end
+  local x = tonumber(position.x)
+  local y = tonumber(position.y) or 0
+  local z = tonumber(position.z)
+  if not x or not z then return false end
+  car.map.view = {
+    available = true,
+    center = { x = x, y = y, z = z },
+    vehicle = { x = x, y = y, z = z },
+    radius = car.map.zooms[car.map.zoomIndex] or 32,
+    step = 1,
+    sharedCells = 0,
+    samples = {}
+  }
+  return true
+end
+
+function car.callTelemetry(method, ...)
+  local port, portName = car.telemetryPort()
+  if not port and not portName then return false, "Telemetry peripheral unavailable", nil end
+  local directError = nil
+  if portName and peripheral and type(peripheral.call) == "function" and car.hasMethod(portName, method) then
+    local called, first, second, third = pcall(peripheral.call, portName, method, ...)
+    if called then return true, first, portName, second, third end
+    directError = first
+  end
+  local fn = port and port[method] or nil
+  if type(fn) ~= "function" then
+    return false, directError or ("Method " .. tostring(method) .. " unavailable"), portName
+  end
+  local called, first, second, third = pcall(fn, ...)
+  if called then return true, first, portName, second, third end
+  return false, directError or first, portName
+end
+
+function car.writeMapDiagnostic(status, detail, portName)
+  local signature = table.concat({ tostring(status or ""), tostring(detail or ""), tostring(portName or "") }, "|")
+  if signature == car.map.logSignature then return end
+  car.map.logSignature = signature
+  local lines = {
+    "RoadRover OS " .. tostring(VERSION) .. " map diagnostics",
+    "status=" .. tostring(status or "unknown"),
+    "detail=" .. tostring(detail or ""),
+    "selectedPeripheral=" .. tostring(portName or car.devices.portName or "none"),
+    "primaryPeripheral=" .. tostring(car.devices.portName or "none"),
+    "secondaryPeripheral=" .. tostring(car.devices.secondaryPortName or "none")
+  }
+  if peripheral and type(peripheral.getNames) == "function" then
+    local namesOK, names = pcall(peripheral.getNames)
+    if namesOK and type(names) == "table" then
+      table.sort(names)
+      for index = 1, #names do
+        local name = names[index]
+        local kind = car.peripheralType(name)
+        local exposed = {}
+        local methodsOK, methods = pcall(peripheral.getMethods, name)
+        if methodsOK and type(methods) == "table" then
+          local wanted = {
+            scanRoad = true,
+            getRoadMap = true,
+            getTweakedTweaksInfo = true,
+            readBus = true,
+            getShipDimensions = true,
+            getPortCount = true
+          }
+          for methodIndex = 1, #methods do
+            local methodName = tostring(methods[methodIndex])
+            if wanted[methodName] then exposed[#exposed + 1] = methodName end
+          end
+          table.sort(exposed)
+        end
+        lines[#lines + 1] = "peripheral=" .. tostring(name)
+          .. " type=" .. tostring(kind ~= "" and kind or "unknown")
+          .. " mapMethods=" .. (#exposed > 0 and table.concat(exposed, ",") or "none")
+      end
+    else
+      lines[#lines + 1] = "peripheralScanError=" .. tostring(names)
+    end
+  else
+    lines[#lines + 1] = "peripheralAPI=unavailable"
+  end
+  local handle = fs.open(MAP_LOG_PATH, "w")
+  if not handle then return end
+  handle.write(table.concat(lines, "\n") .. "\n")
+  handle.close()
 end
 
 function car.routePoints()
@@ -1181,9 +1312,8 @@ function car.routePoints()
 end
 
 function car.updateRoute(force, avoid)
-  local port = car.telemetryPort()
   local destination = car.map.destination
-  if not port or not destination or type(port.planRoadRoute) ~= "function" then
+  if not destination then
     car.map.route = nil
     return false
   end
@@ -1192,9 +1322,9 @@ function car.updateRoute(force, avoid)
   car.map.lastRoute = now
   local ok, route
   if type(avoid) == "table" and tonumber(avoid.x) and tonumber(avoid.z) then
-    ok, route = pcall(port.planRoadRoute, destination.x, destination.z, avoid.x, avoid.z, tonumber(avoid.radius) or 6)
+    ok, route = car.callTelemetry("planRoadRoute", destination.x, destination.z, avoid.x, avoid.z, tonumber(avoid.radius) or 6)
   else
-    ok, route = pcall(port.planRoadRoute, destination.x, destination.z)
+    ok, route = car.callTelemetry("planRoadRoute", destination.x, destination.z)
   end
   if ok and type(route) == "table" then
     if route.available == true then
@@ -1212,8 +1342,8 @@ function car.updateRoute(force, avoid)
 end
 
 function car.updateMap(force)
-  local port = car.telemetryPort()
-  if not port then
+  local port, portName = car.telemetryPort()
+  if not port and not portName then
     local version = nil
     local primary = car.devices.port
     if primary and type(primary.getTweakedTweaksInfo) == "function" then
@@ -1222,18 +1352,22 @@ function car.updateMap(force)
     end
     car.map.error = version and version ~= ""
       and ("Server mod " .. version .. " has no road map API")
-      or "Install Tweaked Tweaks on the server"
+      or (car.devices.portName and ("Road map API unavailable on " .. tostring(car.devices.portName))
+        or "Redstone Port not connected")
     car.map.notice = nil
-    return false
+    car.writeMapDiagnostic("peripheral-unavailable", car.map.error, portName)
+    return car.ensureMapFallback()
   end
+  car.map.portName = portName
   local now = os.clock()
-  if not force and now - car.map.lastUpdate < 0.75 then return true end
+  if not force and now - car.map.lastUpdate < 2 then return true end
   car.map.lastUpdate = now
-  local scanOK, scan = pcall(port.scanRoad, 24)
+  local scanOK, scan, scanPortName = car.callTelemetry("scanRoad", 24)
   if not scanOK or type(scan) ~= "table" or scan.available ~= true then
     car.map.error = tostring((type(scan) == "table" and scan.error) or scan or "Road scan failed")
     car.map.notice = nil
-    return false
+    car.writeMapDiagnostic("scan-failed", car.map.error, scanPortName or portName)
+    return car.ensureMapFallback()
   end
   car.map.scan = scan
   local vehicle = scan.center or {}
@@ -1254,8 +1388,8 @@ function car.updateMap(force)
   }
   car.map.error = nil
   car.map.notice = "LOCAL SCAN"
-  if type(port.getRoadMap) == "function" then
-    local viewOK, view = pcall(port.getRoadMap, centerX, centerZ, radius, step)
+  if (port and type(port.getRoadMap) == "function") or (portName and car.hasMethod(portName, "getRoadMap")) then
+    local viewOK, view = car.callTelemetry("getRoadMap", centerX, centerZ, radius, step)
     if viewOK and type(view) == "table" and view.available == true then
       car.map.view = view
       car.map.notice = nil
@@ -1263,14 +1397,22 @@ function car.updateMap(force)
       car.map.notice = "LOCAL SCAN - SHARED MAP UNAVAILABLE"
     end
   end
-  if type(port.readBus) == "function" then
-    local telemetryOK, telemetry = pcall(port.readBus)
+  car.saveMapCache(car.map.view)
+  if (port and type(port.readBus) == "function") or (portName and car.hasMethod(portName, "readBus")) then
+    local telemetryOK, telemetry = car.callTelemetry("readBus")
     if telemetryOK and type(telemetry) == "table" then car.map.telemetry = telemetry end
   end
-  if not car.map.shipSize and type(port.getShipDimensions) == "function" then
-    local sizeOK, size = pcall(port.getShipDimensions)
+  if not car.map.shipSize and ((port and type(port.getShipDimensions) == "function") or (portName and car.hasMethod(portName, "getShipDimensions"))) then
+    local sizeOK, size = car.callTelemetry("getShipDimensions")
     if sizeOK and type(size) == "table" then car.map.shipSize = size end
   end
+  car.writeMapDiagnostic(
+    "ready",
+    "samples=" .. tostring(type(scan.samples) == "table" and #scan.samples or 0)
+      .. " sharedCells=" .. tostring(scan.sharedCells or 0)
+      .. " loaded=" .. tostring(scan.loaded),
+    scanPortName or portName
+  )
   if car.map.destination then car.updateRoute(force) end
   return car.map.view ~= nil
 end
