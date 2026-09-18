@@ -16,7 +16,8 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.9"
+local VERSION = _G.ROADROVER_VERSION or "2.5.0"
+local SUSPENSION_FALLBACK_SECONDS = 0.35
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -116,10 +117,15 @@ local car = {
   outputCache = { chassis = {}, port = {}, secondary = {} },
   blinkPeriod = 0.55,
   lastBlink = os.clock(),
-  engineOn = true,
+  engineOn = false,
   pulseTimer = nil,
+  suspensionTimer = nil,
   cruiseOn = false,
   driveMode = "normal",
+  animations = {
+    values = {},
+    presses = {}
+  },
   hd = {
     ready = false,
     width = 384,
@@ -319,6 +325,77 @@ local function statsPath()
   return fs.combine(USER_ROOT, "data/stats.json")
 end
 
+local function vehicleStatePath()
+  if not USER_ROOT then return nil end
+  return fs.combine(USER_ROOT, "data/vehicle-state.json")
+end
+
+local vehicleStateDirty = false
+local lastVehicleStateSave = 0
+
+local function saveVehicleState()
+  local path = vehicleStatePath()
+  if not path or not car.state then return false end
+  local data = {
+    mode = car.state.mode,
+    reverse = car.state.reverseSelected and true or false,
+    frontDriveOff = car.state.frontDriveOff and true or false,
+    workshopEngineOff = car.state.workshopEngineOff and true or false,
+    driveEngineOff = car.state.driveEngineOff and true or false,
+    workshopBoost = car.state.workshopBoost and true or false,
+    lighting = car.state.lighting,
+    cruiseOn = car.cruiseOn and true or false,
+    portHeading = car.state.portHeading
+  }
+  local saved = writeJson(path, data)
+  if saved then
+    vehicleStateDirty = false
+    lastVehicleStateSave = os.clock()
+  end
+  return saved
+end
+
+local function loadVehicleState()
+  if not car.state then return false end
+  local data = readJson(vehicleStatePath())
+  if type(data) ~= "table" then return false end
+
+  if data.mode == "standard" or data.mode == "sport" or data.mode == "sport_plus" then
+    car.state.mode = data.mode
+  end
+  car.state.reverseSelected = data.reverse and true or false
+  car.state.reverse = car.state.reverseSelected
+  car.state.frontDriveOff = data.frontDriveOff and true or false
+  car.state.workshopEngineOff = data.workshopEngineOff and true or false
+  car.state.driveEngineOff = data.driveEngineOff and true or false
+  car.state.workshopBoost = data.workshopBoost and true or false
+  if data.lighting == "none" or data.lighting == "headlights" or data.lighting == "left"
+    or data.lighting == "right" or data.lighting == "hazard" then
+    car.state.lighting = data.lighting
+  end
+  if car.headingValid[tostring(data.portHeading or "")] then
+    car.state.portHeading = data.portHeading
+    settings.portHeading = data.portHeading
+  end
+  car.cruiseOn = data.cruiseOn and true or false
+  car.driveMode = car.state.mode == "standard" and "normal" or car.state.mode
+  car.engineOn = not car.state.driveEngineOff
+  car.state.clutch = car.cruiseOn
+  car.state.blink = car.state.lighting ~= "none" and car.state.lighting ~= "headlights"
+  vehicleStateDirty = false
+  return true
+end
+
+local function markVehicleStateDirty()
+  vehicleStateDirty = true
+end
+
+local function flushVehicleState(force)
+  if not vehicleStateDirty then return true end
+  if not force and (os.clock() - lastVehicleStateSave) < 0.4 then return false end
+  return saveVehicleState()
+end
+
 local function profilePath(root)
   if not root then return nil end
   return fs.combine(root, "data/profile.json")
@@ -357,8 +434,6 @@ local function loadUserSettings()
   NIGHT_MODE = settings.nightMode and true or false
   _G.ROADROVER_NIGHT_MODE = NIGHT_MODE and 1 or 0
   applyNightMode()
-  settings.portHeading = "east"
-  if car.state then car.state.portHeading = "east" end
   return true
 end
 
@@ -429,6 +504,7 @@ local function setCurrentUser(rrid)
   if USER_ROOT and USER_NAME and sanitizeRRIDInput(USER_NAME) ~= rrid then
     saveUserSettings()
     saveUserStats()
+    flushVehicleState(true)
   end
   USER_NAME = rrid
   USER_ROOT = ensureUserDirs(userDirKey(rrid))
@@ -440,6 +516,7 @@ local function setCurrentUser(rrid)
   if not loadUserSettings() then saveUserSettings() end
   resetStats()
   if not loadUserStats() then saveUserStats() end
+  if not loadVehicleState() then saveVehicleState() end
   saveProfileDisplay(USER_ROOT, rrid)
   ensureDailyCache()
   return true
@@ -645,9 +722,10 @@ car.state = {
   mode = "standard",
   clutch = false,
   reverse = false,
+  reverseSelected = false,
   frontDriveOff = false,
-  workshopEngineOff = false,
-  driveEngineOff = false,
+  workshopEngineOff = true,
+  driveEngineOff = true,
   workshopBoost = false,
   lighting = "none",
   blink = false,
@@ -867,6 +945,7 @@ function car.setLighting(mode)
   car.state.blink = mode ~= "none" and mode ~= "headlights"
   car.lastBlink = os.clock()
   car.applyOutputs()
+  markVehicleStateDirty()
 end
 
 function car.toggleIndicator(side)
@@ -881,6 +960,7 @@ function car.cyclePortHeading()
   settings.portHeading = "east"
   saveUserSettings()
   car.applyOutputs()
+  markVehicleStateDirty()
 end
 
 function car.engineOutput(side, val)
@@ -920,6 +1000,7 @@ function car.setEngine(state)
     car.cruiseOn = false
     car.driveOutput(DRIVE_SIDE, false)
   end
+  markVehicleStateDirty()
 end
 
 function car.toggleEngine()
@@ -931,13 +1012,16 @@ function car.setDriveMode(mode)
   car.driveMode = mode
   car.state.mode = mode == "normal" and "standard" or mode
   car.applyOutputs()
+  markVehicleStateDirty()
 end
 
 car.scanDevices(true)
-car.clearPortOutputs()
-car.engineOutput(ENGINE_SIDE, true)
-car.setDriveMode(car.driveMode)
-car.driveOutput(DRIVE_SIDE, false)
+car.state.workshopEngineOff = true
+car.state.driveEngineOff = true
+car.engineOn = false
+car.cruiseOn = false
+car.state.clutch = false
+car.applyOutputs()
 
 local speedBuf = {}
 local function smoothBps(v)
@@ -1111,8 +1195,8 @@ local function rebuildUI()
   local leftW
   local rightW
   if hdCompact then
-    leftW = clamp(math.floor(w * 0.15), 10, 15)
-    rightW = clamp(math.floor(w * 0.10), 7, 10)
+    leftW = clamp(math.floor(w * 0.15), 11, 14)
+    rightW = clamp(math.floor(w * 0.15), 10, 14)
   else
     leftW = compact and clamp(math.floor(w * 0.25), 7, math.max(7, w - 12)) or math.floor(w / 3)
     rightW = compact and clamp(math.floor(w * 0.16), 5, math.max(5, w - leftW - 8))
@@ -1185,6 +1269,67 @@ local function fillRect(win, x, y, w, h, bg)
     win.setCursorPos(x, yy)
     win.setBackgroundColor(bg)
     win.write((" "):rep(w))
+  end
+end
+
+local function approach(current, target, amount)
+  if current < target then return math.min(target, current + amount) end
+  if current > target then return math.max(target, current - amount) end
+  return target
+end
+
+local function easeOutCubic(value)
+  value = clamp(tonumber(value) or 0, 0, 1)
+  local inverse = 1 - value
+  return 1 - inverse * inverse * inverse
+end
+
+function car.bumpAnimation(key)
+  if not key then return end
+  car.animations.presses[key] = 1
+end
+
+local function animationProgress(key, active)
+  local values = car.animations.values
+  local presses = car.animations.presses
+  local current = tonumber(values[key]) or 0
+  current = approach(current, active and 1 or 0, active and 0.22 or 0.18)
+  local press = tonumber(presses[key]) or 0
+  if press > 0 then
+    press = math.max(0, press - 0.28)
+    presses[key] = press > 0 and press or nil
+  end
+  values[key] = current
+  return easeOutCubic(math.max(current, press * 0.16))
+end
+
+local function drawAnimatedLine(win, x, y, w, text, overlayWidth, activeFg, inactiveFg, activeBg, inactiveBg)
+  text = trim(text or "", math.max(1, w - (w >= 3 and 2 or 0)))
+  local startX = x + math.max(0, math.floor((w - #text) / 2))
+  local overlayEnd = x + overlayWidth - 1
+  for index = 1, #text do
+    local charX = startX + index - 1
+    local covered = overlayWidth > 0 and charX <= overlayEnd
+    writeAt(win, charX, y, text:sub(index, index), covered and activeFg or inactiveFg, covered and activeBg or inactiveBg)
+  end
+end
+
+local function drawAnimatedButton(win, x, y, w, h, key, line1, line2, active, activeBg, inactiveBg)
+  if w < 1 or h < 1 then return end
+  activeBg = activeBg or COLORS.activeBg
+  inactiveBg = inactiveBg or COLORS.panel
+  local activeFg = activeBg == COLORS.activeBg and COLORS.activeText or bestFg(activeBg)
+  local inactiveFg = inactiveBg == COLORS.panel and COLORS.panelText or bestFg(inactiveBg)
+  local progress = animationProgress(key, active)
+  local overlayWidth = math.floor(w * progress + 0.5)
+  fillRect(win, x, y, w, h, inactiveBg)
+  if overlayWidth > 0 then fillRect(win, x, y, overlayWidth, h, activeBg) end
+  if line2 and line2 ~= "" and h >= 2 then
+    local firstY = y + math.floor((h - 2) / 2)
+    drawAnimatedLine(win, x, firstY, w, line1, overlayWidth, activeFg, inactiveFg, activeBg, inactiveBg)
+    drawAnimatedLine(win, x, firstY + 1, w, line2, overlayWidth, activeFg, inactiveFg, activeBg, inactiveBg)
+  else
+    drawAnimatedLine(win, x, y + math.floor((h - 1) / 2), w, line1, overlayWidth, activeFg, inactiveFg, activeBg, inactiveBg)
   end
 end
 
@@ -2077,18 +2222,8 @@ function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX,
     local mode = modes[index]
     local y = top + (index - 1) * (modeH + modeGap)
     local height = index == #modes and layout.h - y + 1 or modeH
-    fillRect(centerWin, modeX, y, modeW, height, COLORS.panel)
-    local bg = COLORS.panel
-    local fg = COLORS.panelText
-    if not mode.active and modeW > 2 and height > 2 then
-      fillRect(centerWin, modeX + 1, y + 1, modeW - 2, height - 2, COLORS.bg)
-      bg = COLORS.bg
-      fg = COLORS.fg
-    end
     local text = trim(mode.label, math.max(1, modeW - (mode.active and 0 or 2)))
-    local tx = modeX + math.floor((modeW - #text) / 2)
-    local ty = y + math.floor((height - 1) / 2)
-    writeAt(centerWin, tx, ty, text, fg, bg)
+    drawAnimatedButton(centerWin, modeX, y, modeW, height, "mode:" .. mode.id, text, nil, mode.active, COLORS.activeBg, COLORS.panel)
     car.driveBoxes[mode.id] = {
       x1 = layout.centerX + modeX - 1,
       y1 = y,
@@ -2125,21 +2260,9 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
     local width = column == columns and layout.centerW - x + 1 or buttonW
     local height = row == rows and layout.h - y + 1 or buttonH
     if width >= 1 and height >= 1 then
-      fillRect(centerWin, x, y, width, height, COLORS.panel)
-      local foreground = COLORS.panelText
-      local background = COLORS.panel
-      if control.active and width > 2 and height > 2 then
-        fillRect(centerWin, x + 1, y + 1, width - 2, height - 2, COLORS.activeBg)
-        foreground = COLORS.activeText
-        background = COLORS.activeBg
-      end
       local line1 = trim(height == 1 and control.status or control.title, math.max(1, width - 2))
       local line2 = trim(control.status, math.max(1, width - 2))
-      local lineY = y + math.max(0, math.floor((height - 2) / 2))
-      writeAt(centerWin, x + math.max(0, math.floor((width - #line1) / 2)), lineY, line1, foreground, background)
-      if height > 1 then
-        writeAt(centerWin, x + math.max(0, math.floor((width - #line2) / 2)), math.min(y + height - 1, lineY + 1), line2, foreground, background)
-      end
+      drawAnimatedButton(centerWin, x, y, width, height, "home:" .. control.id, line1, height > 1 and line2 or nil, control.active, COLORS.activeBg, COLORS.panel)
       car.driveBoxes[control.id] = {
         x1 = layout.centerX + x - 1,
         y1 = y,
@@ -2406,7 +2529,7 @@ function car.drawDrive(y0)
   local margin = 1
   local gapX = 1
   local gapY = 1
-  local columns = layout.hdCompact and 5 or 3
+  local columns = layout.hdCompact and (layout.centerW >= 64 and 5 or 4) or 3
   local buttonH = layout.hdCompact and 3 or 2
   local availableH = layout.h - y0 + 1
   if availableH < 16 then
@@ -2422,18 +2545,14 @@ function car.drawDrive(y0)
     local width = column == columns and layout.centerW - x - margin + 1 or buttonW
     if y > layout.h or width < 1 then return end
     local height = math.min(buttonH, layout.h - y + 1)
-    local bg = active and (accent or colors.lime) or COLORS.panel
-    local fg = active and bestFg(bg) or COLORS.panelText
-    fillRect(centerWin, x, y, width, height, bg)
     local line1, line2 = wrap2(title, math.max(1, width - 2))
     if height == 1 then
       local label = trim(line1 .. (status and (" " .. status) or ""), width)
-      writeAt(centerWin, x + math.max(0, math.floor((width - #label) / 2)), y, label, fg, bg)
+      drawAnimatedButton(centerWin, x, y, width, height, "drive:" .. id, label, nil, active, accent or colors.lime, COLORS.panel)
     else
       local label1 = trim(line1, width)
       local label2 = trim(status or line2 or "", width)
-      writeAt(centerWin, x + math.max(0, math.floor((width - #label1) / 2)), y, label1, fg, bg)
-      writeAt(centerWin, x + math.max(0, math.floor((width - #label2) / 2)), y + 1, label2, fg, bg)
+      drawAnimatedButton(centerWin, x, y, width, height, "drive:" .. id, label1, label2, active, accent or colors.lime, COLORS.panel)
     end
     car.driveBoxes[id] = {
       x1 = layout.centerX + x - 1,
@@ -2542,11 +2661,11 @@ end
 local function computeRightLayout()
   local tabsX = 1
   local tabW = layout.rightW
-  local tabH = 2
-  local startY = 3
-  local pageH = 2
-  local pageY = math.max(2, layout.h - pageH + 1)
-  local bottom = pageY - 1
+  local tabH = layout.hdCompact and 1 or 2
+  local startY = layout.hdCompact and 2 or 3
+  local pageH = layout.hdCompact and 0 or 2
+  local pageY = pageH > 0 and math.max(2, layout.h - pageH + 1) or layout.h + 1
+  local bottom = pageH > 0 and pageY - 1 or layout.h
   return {
     tabsX = tabsX,
     tabW = tabW,
@@ -2561,7 +2680,7 @@ end
 local function buildPageTabs()
   local pageTabs = {}
   for i = 1, #tabs do
-    if (tabs[i].page or 1) == tabPage then
+    if layout.hdCompact or (tabs[i].page or 1) == tabPage then
       pageTabs[#pageTabs + 1] = { idx = i, tab = tabs[i] }
     end
   end
@@ -2575,15 +2694,8 @@ local function drawRightTabs(pageTabs, l)
 
     local t = pageTabs[i].tab
     local active = (pageTabs[i].idx == activeTab)
-    local bg = active and COLORS.activeBg or COLORS.panel
-    local fg = active and COLORS.activeText or COLORS.panelText
-
-    fillRect(rightWin, l.tabsX, y, l.tabW, l.tabH, bg)
-
-    local label = trim(t.label or t.title or "", l.tabW - 2)
-    local ly = y + math.floor((l.tabH - 1) / 2)
-    local tx = l.tabsX + math.floor((l.tabW - #label) / 2)
-    writeAt(rightWin, tx, ly, label, fg, bg)
+    local label = trim((layout.hdCompact and t.title) or t.label or t.title or "", math.max(1, l.tabW - 2))
+    drawAnimatedButton(rightWin, l.tabsX, y, l.tabW, l.tabH, "sidebar:" .. t.id, label, nil, active, COLORS.activeBg, COLORS.panel)
 
     tabBoxes[#tabBoxes + 1] = {
       x1 = layout.rightX + l.tabsX - 1,
@@ -2596,6 +2708,10 @@ local function drawRightTabs(pageTabs, l)
 end
 
 local function drawRightPageButton(l)
+  if l.pageH < 1 then
+    pageBox = nil
+    return
+  end
   local pageLabel = (tabPage == 1) and ">>" or "<<"
   if l.tabW <= 4 then pageLabel = (tabPage == 1) and ">" or "<" end
   local pageBg = COLORS.panel
@@ -2680,7 +2796,37 @@ local function selectTabById(id)
   return false
 end
 
+function car.releaseSuspension()
+  if car.suspensionTimer and os.cancelTimer then pcall(os.cancelTimer, car.suspensionTimer) end
+  car.suspensionTimer = nil
+  if car.state.suspension == "neutral" then return false end
+  car.state.suspension = "neutral"
+  car.applyOutputs()
+  return true
+end
+
+function car.setSuspension(direction, fallback)
+  if direction ~= "up" and direction ~= "down" then return car.releaseSuspension() end
+  if car.suspensionTimer and os.cancelTimer then pcall(os.cancelTimer, car.suspensionTimer) end
+  car.suspensionTimer = nil
+  car.state.suspension = direction
+  car.applyOutputs()
+  if fallback then car.suspensionTimer = os.startTimer(SUSPENSION_FALLBACK_SECONDS) end
+  return true
+end
+
+local function suspensionControlAt(mx, my)
+  local upBox = car.driveBoxes.suspension_up
+  local downBox = car.driveBoxes.suspension_down
+  if hit(upBox, mx, my) then return "up", "suspension_up" end
+  if hit(downBox, mx, my) then return "down", "suspension_down" end
+  return nil, nil
+end
+
 function car.handleDriveControl(id)
+  car.bumpAnimation("drive:" .. tostring(id))
+  car.bumpAnimation("home:" .. tostring(id))
+  car.bumpAnimation("mode:" .. tostring(id))
   if id == "standard" then
     car.setDriveMode("normal")
   elseif id == "sport" then
@@ -2693,9 +2839,11 @@ function car.handleDriveControl(id)
   elseif id == "cruise" then
     car.cruiseOn = not car.cruiseOn
     car.driveOutput(DRIVE_SIDE, car.cruiseOn)
+    markVehicleStateDirty()
     return true
   elseif id == "reverse" then
-    car.state.reverse = not car.state.reverse
+    car.state.reverseSelected = not car.state.reverseSelected
+    car.state.reverse = car.state.reverseSelected or car.state.sHeld
   elseif id == "front_drive" then
     car.state.frontDriveOff = not car.state.frontDriveOff
   elseif id == "drive_engine" then
@@ -2705,10 +2853,8 @@ function car.handleDriveControl(id)
     car.state.workshopEngineOff = not car.state.workshopEngineOff
   elseif id == "boost" then
     car.state.workshopBoost = not car.state.workshopBoost
-  elseif id == "suspension_up" then
-    car.state.suspension = car.state.suspension == "up" and "neutral" or "up"
-  elseif id == "suspension_down" then
-    car.state.suspension = car.state.suspension == "down" and "neutral" or "down"
+  elseif id == "suspension_up" or id == "suspension_down" then
+    return false
   elseif id == "headlights" then
     car.setLighting("headlights")
     return true
@@ -2728,6 +2874,7 @@ function car.handleDriveControl(id)
     return false
   end
   car.applyOutputs()
+  markVehicleStateDirty()
   return true
 end
 
@@ -2762,6 +2909,7 @@ local function handleClick(mx, my)
   if cruiseBox and hit(cruiseBox, mx, my) then
     car.cruiseOn = not car.cruiseOn
     car.driveOutput(DRIVE_SIDE, car.cruiseOn)
+    markVehicleStateDirty()
     return true
   end
 
@@ -2782,6 +2930,7 @@ local function handleClick(mx, my)
     if actionBoxes.cruise and hit(actionBoxes.cruise, mx, my) then
       car.cruiseOn = not car.cruiseOn
       car.driveOutput(DRIVE_SIDE, car.cruiseOn)
+      markVehicleStateDirty()
       return true
     end
     if actionBoxes.change_rrid and hit(actionBoxes.change_rrid, mx, my) then
@@ -2881,11 +3030,24 @@ local function handleClick(mx, my)
     if hit(tabBoxes[i], mx, my) then
       activeTab = tabBoxes[i].tabIndex or activeTab
       tabPage = (tabs[activeTab] and tabs[activeTab].page) or tabPage
+      if tabs[activeTab] then car.bumpAnimation("sidebar:" .. tabs[activeTab].id) end
       return true
     end
   end
 
   return false
+end
+
+local function handlePointer(mx, my, isDown, supportsRelease)
+  if isDown == false then return car.releaseSuspension() end
+  if isDown ~= true then return false end
+  local direction, id = suspensionControlAt(mx, my)
+  if direction then
+    car.bumpAnimation("home:" .. id)
+    car.bumpAnimation("drive:" .. id)
+    return car.setSuspension(direction, not supportsRelease)
+  end
+  return handleClick(mx, my)
 end
 
 function car.updateHardware()
@@ -2896,6 +3058,7 @@ function car.updateHardware()
     car.lastBlink = now
   end
   car.applyOutputs()
+  flushVehicleState(false)
 end
 
 function car.keyName(code)
@@ -2923,7 +3086,7 @@ function car.handleKey(code, down, repeated)
     car.state.clutch = car.state.wHeld or car.state.sHeld or car.cruiseOn
   elseif name == "s" then
     car.state.sHeld = down
-    car.state.reverse = car.state.sHeld
+    car.state.reverse = car.state.reverseSelected or car.state.sHeld
     car.state.clutch = car.state.wHeld or car.state.sHeld or car.cruiseOn
   elseif name == "a" then
     car.state.aHeld = down
@@ -2931,9 +3094,11 @@ function car.handleKey(code, down, repeated)
     car.state.dHeld = down
   elseif fresh and name == "g" then
     car.state.frontDriveOff = not car.state.frontDriveOff
+    markVehicleStateDirty()
   elseif fresh and name == "f" then
     car.state.driveEngineOff = not car.state.driveEngineOff
     car.engineOn = not car.state.driveEngineOff
+    markVehicleStateDirty()
   elseif fresh and name == "l" then
     car.setLighting("headlights")
     return true
@@ -2959,7 +3124,8 @@ function car.releaseKeys()
   car.state.aHeld = false
   car.state.dHeld = false
   car.state.clutch = car.cruiseOn
-  car.state.reverse = false
+  car.state.reverse = car.state.reverseSelected
+  car.releaseSuspension()
   car.applyOutputs()
 end
 
@@ -2967,6 +3133,7 @@ function car.safeShutdown()
   car.state.mode = "standard"
   car.state.clutch = false
   car.state.reverse = false
+  car.state.reverseSelected = false
   car.state.wHeld = false
   car.state.sHeld = false
   car.state.aHeld = false
@@ -3027,6 +3194,18 @@ local function main()
   rebuildUI()
   redraw()
   ensureProfile()
+  car.state.workshopEngineOff = true
+  car.state.driveEngineOff = true
+  car.engineOn = false
+  car.state.wHeld = false
+  car.state.sHeld = false
+  car.state.aHeld = false
+  car.state.dHeld = false
+  car.state.suspension = "neutral"
+  car.state.clutch = car.cruiseOn
+  markVehicleStateDirty()
+  car.applyOutputs()
+  flushVehicleState(true)
   rebuildUI()
   redraw()
 
@@ -3047,18 +3226,31 @@ local function main()
     elseif ev == "timer" and car.pulseTimer and a == car.pulseTimer then
       car.stopPulse()
 
-    elseif ev == "tm_monitor_mouse_click" or ev == "tm_monitor_touch" then
+    elseif ev == "timer" and car.suspensionTimer and a == car.suspensionTimer then
+      if car.releaseSuspension() then redraw() end
+
+    elseif ev == "tm_monitor_touch" then
+      local mx, my
+      if car.hdToTermPoint then mx, my = car.hdToTermPoint(b, c) end
+      local hasRelease = type(d) == "boolean"
+      local pressed = hasRelease and d or true
+      if mx and my and handlePointer(mx, my, pressed, hasRelease) then redraw() end
+
+    elseif ev == "tm_monitor_mouse_click" then
       local mx, my
       if car.hdToTermPoint then mx, my = car.hdToTermPoint(a, b, c, d) end
-      if mx and my and handleClick(mx, my) then redraw() end
+      if mx and my and handlePointer(mx, my, true, false) then redraw() end
 
     elseif ev == "monitor_touch" then
       local mx, my = b, c
-      if handleClick(mx, my) then redraw() end
+      if handlePointer(mx, my, true, false) then redraw() end
 
     elseif ev == "mouse_click" then
       local mx, my = b, c
-      if handleClick(mx, my) then redraw() end
+      if handlePointer(mx, my, true, true) then redraw() end
+
+    elseif ev == "mouse_up" then
+      if handlePointer(b, c, false, true) then redraw() end
 
     elseif ev == "key" then
       if car.handleKey(a, true, b == true) then redraw() end
