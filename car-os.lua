@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.5"
+local VERSION = _G.ROADROVER_VERSION or "2.7.6"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -150,6 +150,9 @@ local car = {
     cacheSignature = nil,
     lastCacheSave = -1e9,
     lastUpdate = -1e9,
+    lastScanAt = -1e9,
+    lastScanX = nil,
+    lastScanZ = nil,
     lastRoute = -1e9,
     viewport = nil,
     boxes = {}
@@ -1363,7 +1366,16 @@ function car.updateMap(force)
   end
   car.map.portName = portName
   local now = os.clock()
-  if not force and now - car.map.lastUpdate < 2 then return true end
+  local scanInterval = car.autopilot.enabled and 2.5 or 6
+  if not force and now - car.map.lastUpdate < scanInterval then return true end
+  if not force and car.map.view and curPos and car.map.lastScanX and car.map.lastScanZ then
+    local dx = (tonumber(curPos.x) or car.map.lastScanX) - car.map.lastScanX
+    local dz = (tonumber(curPos.z) or car.map.lastScanZ) - car.map.lastScanZ
+    if dx * dx + dz * dz < 4 and now - car.map.lastScanAt < 30 then
+      car.map.lastUpdate = now
+      return true
+    end
+  end
   car.map.lastUpdate = now
   if not car.map.serverVersion then
     local infoOK, info = car.callTelemetry("getTweakedTweaksInfo")
@@ -1377,7 +1389,7 @@ function car.updateMap(force)
       local version = car.map.serverVersion and car.map.serverVersion ~= "" and car.map.serverVersion or "old"
       car.map.error = "SERVER MOD " .. version .. " MUST BE UPDATED"
     else
-      car.map.error = rawError
+      car.map.error = "ROAD SONAR ERROR - SEE LOG"
     end
     car.map.notice = nil
     car.writeMapDiagnostic("scan-failed", rawError, scanPortName or portName)
@@ -1387,6 +1399,9 @@ function car.updateMap(force)
   local vehicle = scan.center or {}
   local vehicleX = tonumber(vehicle.x) or 0
   local vehicleZ = tonumber(vehicle.z) or 0
+  car.map.lastScanAt = now
+  car.map.lastScanX = vehicleX
+  car.map.lastScanZ = vehicleZ
   local centerX = vehicleX + car.map.panX
   local centerZ = vehicleZ + car.map.panZ
   local radius = car.map.zooms[car.map.zoomIndex] or 32
@@ -1402,12 +1417,18 @@ function car.updateMap(force)
   }
   car.map.error = nil
   car.map.errorDetail = nil
-  car.map.notice = "LOCAL SCAN"
+  if scan.seedFound == false then
+    car.map.notice = "NO CONNECTED ROAD NEAR VEHICLE"
+  elseif scan.budgetLimited == true then
+    car.map.notice = "ROAD SONAR RANGE LIMITED"
+  else
+    car.map.notice = "ROAD SONAR"
+  end
   if (port and type(port.getRoadMap) == "function") or (portName and car.hasMethod(portName, "getRoadMap")) then
     local viewOK, view = car.callTelemetry("getRoadMap", centerX, centerZ, radius, step)
     if viewOK and type(view) == "table" and view.available == true then
       car.map.view = view
-      car.map.notice = nil
+      if scan.seedFound ~= false and scan.budgetLimited ~= true then car.map.notice = nil end
     else
       car.map.notice = "LOCAL SCAN - SHARED MAP UNAVAILABLE"
     end
@@ -1849,6 +1870,7 @@ end
 
 function car.updateAutopilot()
   if not car.autopilot.enabled then return end
+  car.updateMap(false)
   local now = os.clock()
   local position = car.vehicleWorldPosition()
   local points = car.routePoints()
@@ -4245,7 +4267,6 @@ end
 
 function car.updateHardware()
   car.scanDevices(false)
-  car.updateMap(false)
   car.updateAutopilot()
   local now = os.clock()
   if car.pointer.down and now - car.pointer.lastSeen > 0.8 then
