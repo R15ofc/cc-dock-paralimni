@@ -16,7 +16,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.6.0"
+local VERSION = _G.ROADROVER_VERSION or "2.7.0"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -149,7 +149,30 @@ local car = {
     targetSpeed = 0,
     steering = "CENTER",
     obstacleDistance = nil,
+    stoppingDistance = 0,
+    stoppingTime = 0,
+    behavior = "OFF",
+    selectedMode = "standard",
     lastControl = 0
+  },
+  ai = {
+    perception = { traffic = nil, ships = nil, fleet = nil },
+    lastPerception = -1e9,
+    lastPublish = -1e9,
+    ownShipId = nil,
+    lastSpeed = 0,
+    lastDynamics = nil,
+    deceleration = 3.0,
+    lastMovingAt = os.clock(),
+    bestDestinationDistance = math.huge,
+    lastProgressAt = os.clock(),
+    blockingId = nil,
+    blockingSince = nil,
+    lastDetour = -1e9,
+    routeIndex = 1,
+    recovery = { phase = nil, started = 0, attempts = 0, steer = 0 },
+    overtake = { phase = nil, started = 0, side = 1, leadId = nil },
+    history = {}
   },
   hd = {
     ready = false,
@@ -1146,7 +1169,7 @@ function car.routePoints()
   return route.points
 end
 
-function car.updateRoute(force)
+function car.updateRoute(force, avoid)
   local port = car.telemetryPort()
   local destination = car.map.destination
   if not port or not destination or type(port.planRoadRoute) ~= "function" then
@@ -1156,11 +1179,21 @@ function car.updateRoute(force)
   local now = os.clock()
   if not force and now - car.map.lastRoute < 3 then return car.routePoints() ~= nil end
   car.map.lastRoute = now
-  local ok, route = pcall(port.planRoadRoute, destination.x, destination.z)
+  local ok, route
+  if type(avoid) == "table" and tonumber(avoid.x) and tonumber(avoid.z) then
+    ok, route = pcall(port.planRoadRoute, destination.x, destination.z, avoid.x, avoid.z, tonumber(avoid.radius) or 6)
+  else
+    ok, route = pcall(port.planRoadRoute, destination.x, destination.z)
+  end
   if ok and type(route) == "table" then
-    car.map.route = route
-    if route.available ~= true then car.map.error = tostring(route.error or "Route unavailable") end
-    return route.available == true
+    if route.available == true then
+      car.map.route = route
+      car.map.error = nil
+      return true
+    end
+    if not (type(avoid) == "table" and car.routePoints()) then car.map.route = route end
+    car.map.error = tostring(route.error or "Route unavailable")
+    return false
   end
   car.map.route = nil
   car.map.error = tostring(route or "Route request failed")
@@ -1231,29 +1264,371 @@ function car.nearestObstacle(position)
   return nearest
 end
 
-function car.routeTarget(position, points)
-  if not position or not points or #points == 0 then return nil end
+function car.aiDimensions()
+  local size = car.map.shipSize
+  if type(size) ~= "table" then return 2.5, 5, 2 end
+  local width = tonumber(size.width) or 2.5
+  local length = tonumber(size.length) or 5
+  if width > length then width, length = length, width end
+  return math.max(1, width), math.max(2, length), math.max(1, tonumber(size.height) or 2)
+end
+
+function car.aiDistance(first, second)
+  if type(first) ~= "table" or type(second) ~= "table" then return math.huge end
+  local firstX, firstZ = tonumber(first.x), tonumber(first.z)
+  local secondX, secondZ = tonumber(second.x), tonumber(second.z)
+  if not firstX or not firstZ or not secondX or not secondZ then return math.huge end
+  return math.sqrt((secondX - firstX) ^ 2 + (secondZ - firstZ) ^ 2)
+end
+
+function car.aiUpdateDynamics(now, distanceToDestination)
+  local ai = car.ai
+  local dt = ai.lastDynamics and (now - ai.lastDynamics) or 0
+  if dt > 0.04 and dt < 1.5 then
+    local observed = (ai.lastSpeed - speedBps) / dt
+    if observed > 0.2 and observed < 24 and not car.state.clutch then
+      ai.deceleration = clamp(ai.deceleration * 0.86 + observed * 0.14, 0.8, 12)
+    end
+  end
+  ai.lastSpeed = speedBps
+  ai.lastDynamics = now
+  if speedBps > 0.35 then ai.lastMovingAt = now end
+  if distanceToDestination + 0.75 < ai.bestDestinationDistance then
+    ai.bestDestinationDistance = distanceToDestination
+    ai.lastProgressAt = now
+  end
+  ai.history[#ai.history + 1] = { time = now, speed = speedBps, clutch = car.state.clutch and true or false }
+  while #ai.history > 48 do table.remove(ai.history, 1) end
+end
+
+function car.aiStoppingModel(targetSpeed)
+  local _, length = car.aiDimensions()
+  local deceleration = clamp(tonumber(car.ai.deceleration) or 3, 0.8, 12)
+  local reaction = car.driveMode == "sport_plus" and 0.38 or (car.driveMode == "sport" and 0.45 or 0.55)
+  local currentSquared = speedBps * speedBps
+  local targetSquared = math.max(0, tonumber(targetSpeed) or 0) ^ 2
+  local braking = math.max(0, currentSquared - targetSquared) / (2 * deceleration)
+  local margin = 2 + length * 0.5
+  return braking + speedBps * reaction + margin, math.max(0, speedBps - (tonumber(targetSpeed) or 0)) / deceleration + reaction
+end
+
+function car.aiRouteGeometry(position, points)
+  if not position or type(points) ~= "table" or #points == 0 then return nil end
   local nearestIndex = 1
   local nearestDistance = math.huge
   for index = 1, #points do
     local point = points[index]
-    local x, z = tonumber(point.x), tonumber(point.z)
-    if x and z then
-      local distance = (x - position.x) ^ 2 + (z - position.z) ^ 2
-      if distance < nearestDistance then nearestDistance = distance; nearestIndex = index end
+    local distance = car.aiDistance(position, point)
+    if distance < nearestDistance then nearestDistance = distance; nearestIndex = index end
+  end
+  car.ai.routeIndex = nearestIndex
+  local wanted = clamp(3.5 + speedBps * 0.9, 4, 16)
+  local targetIndex = nearestIndex
+  local walked = 0
+  local previous = position
+  while targetIndex < #points and walked < wanted do
+    targetIndex = targetIndex + 1
+    walked = walked + car.aiDistance(previous, points[targetIndex])
+    previous = points[targetIndex]
+  end
+  local target = points[targetIndex] or points[#points]
+  local nextPoint = points[math.min(#points, targetIndex + 1)] or target
+  local targetX, targetZ = tonumber(target.x), tonumber(target.z)
+  local nextX, nextZ = tonumber(nextPoint.x), tonumber(nextPoint.z)
+  if not targetX or not targetZ or not nextX or not nextZ then return nil end
+  local firstHeading = car.atan2(targetZ - position.z, targetX - position.x)
+  local secondHeading = (nextX == targetX and nextZ == targetZ) and firstHeading or car.atan2(nextZ - targetZ, nextX - targetX)
+  local turnAngle = math.abs(car.normalizeAngle(secondHeading - firstHeading))
+  local segment = math.max(1, car.aiDistance(position, target))
+  local radius = turnAngle < 0.03 and 999 or math.max(2, segment / math.max(0.08, 2 * math.sin(turnAngle * 0.5)))
+  return {
+    target = target,
+    nextPoint = nextPoint,
+    nearestIndex = nearestIndex,
+    targetIndex = targetIndex,
+    desiredHeading = firstHeading,
+    turnAngle = turnAngle,
+    turnRadius = radius,
+    turnDistance = segment
+  }
+end
+
+function car.aiUpdatePerception(position, heading, target)
+  local port = car.telemetryPort()
+  if not port then return end
+  local now = os.clock()
+  if now - car.ai.lastPerception >= 0.45 then
+    car.ai.lastPerception = now
+    if type(port.scanProtectedTraffic) == "function" then
+      local ok, value = pcall(port.scanProtectedTraffic, 80)
+      if ok and type(value) == "table" and value.available == true then car.ai.perception.traffic = value end
+    end
+    if type(port.scanShips) == "function" then
+      local ok, value = pcall(port.scanShips, 160)
+      if ok and type(value) == "table" and value.available == true then car.ai.perception.ships = value end
+    end
+    if type(port.getFleetVehicles) == "function" then
+      local ok, value = pcall(port.getFleetVehicles, 192)
+      if ok and type(value) == "table" and value.available == true then car.ai.perception.fleet = value end
     end
   end
-  local lookAhead = clamp(math.floor(2 + speedBps * 0.35), 2, 5)
-  return points[math.min(#points, nearestIndex + lookAhead)]
+  if now - car.ai.lastPublish >= 0.35 and type(port.publishFleetState) == "function" then
+    car.ai.lastPublish = now
+    local destination = car.map.destination or position
+    local waypoint = target or destination
+    local ok, value = pcall(
+      port.publishFleetState,
+      car.autopilot.enabled,
+      heading or 0,
+      car.autopilot.targetSpeed or 0,
+      destination.x or position.x,
+      destination.z or position.z,
+      waypoint.x or position.x,
+      waypoint.z or position.z,
+      car.autopilot.behavior or "manual"
+    )
+    if ok and type(value) == "table" and value.available == true then car.ai.ownShipId = tonumber(value.shipId) end
+  end
+end
+
+function car.aiContactMetrics(position, heading, contact)
+  if type(contact) ~= "table" then return nil end
+  local contactX, contactZ = tonumber(contact.x), tonumber(contact.z)
+  if not contactX or not contactZ then return nil end
+  local forwardX, forwardZ = math.cos(heading), math.sin(heading)
+  local leftX, leftZ = -forwardZ, forwardX
+  local relativeX, relativeZ = contactX - position.x, contactZ - position.z
+  local longitudinal = relativeX * forwardX + relativeZ * forwardZ
+  local lateral = relativeX * leftX + relativeZ * leftZ
+  local width, length = car.aiDimensions()
+  local contactWidth = math.max(0.5, tonumber(contact.width) or tonumber(contact.worldWidth) or 2)
+  local contactLength = math.max(0.5, tonumber(contact.length) or tonumber(contact.worldLength) or contactWidth)
+  local halfWidth = (width + math.min(contactWidth, contactLength)) * 0.5 + 1.25
+  local halfLength = (length + math.max(contactWidth, contactLength)) * 0.5 + 2
+  local velocityX, velocityZ = tonumber(contact.vx) or 0, tonumber(contact.vz) or 0
+  local ownVelocityX, ownVelocityZ = forwardX * speedBps, forwardZ * speedBps
+  local relativeVelocityX, relativeVelocityZ = velocityX - ownVelocityX, velocityZ - ownVelocityZ
+  local earliest, minimumDistance = nil, math.sqrt(relativeX * relativeX + relativeZ * relativeZ)
+  local horizons = { 0.5, 1, 1.5, 2, 3 }
+  for index = 1, #horizons do
+    local horizon = horizons[index]
+    local futureX = relativeX + relativeVelocityX * horizon
+    local futureZ = relativeZ + relativeVelocityZ * horizon
+    local futureLong = futureX * forwardX + futureZ * forwardZ
+    local futureLateral = futureX * leftX + futureZ * leftZ
+    local futureDistance = math.sqrt(futureX * futureX + futureZ * futureZ)
+    minimumDistance = math.min(minimumDistance, futureDistance)
+    if not earliest and math.abs(futureLateral) <= halfWidth and futureLong >= -halfLength and futureLong <= halfLength + speedBps * 1.4 then
+      earliest = horizon
+    end
+  end
+  local forwardSpeed = velocityX * forwardX + velocityZ * forwardZ
+  return {
+    contact = contact,
+    id = tostring(contact.id or contact.kind or "contact"),
+    distance = math.sqrt(relativeX * relativeX + relativeZ * relativeZ),
+    minimumDistance = minimumDistance,
+    longitudinal = longitudinal,
+    lateral = lateral,
+    halfWidth = halfWidth,
+    halfLength = halfLength,
+    speed = math.sqrt(velocityX * velocityX + velocityZ * velocityZ),
+    forwardSpeed = forwardSpeed,
+    collisionTime = earliest,
+    ahead = longitudinal > -halfLength and math.abs(lateral) <= halfWidth + 1,
+    behind = longitudinal < 0 and math.abs(lateral) <= halfWidth + 2,
+    protected = contact.protected == true or contact.kind == "player" or contact.kind == "cat" or contact.kind == "dog"
+  }
+end
+
+function car.aiAssessTraffic(position, heading, stopDistance, stopTime)
+  local result = {
+    hardStop = false,
+    reason = nil,
+    nearest = math.huge,
+    lead = nil,
+    oncoming = false,
+    protectedNearby = false,
+    protectedBehind = false,
+    stationaryBlock = nil,
+    allied = {}
+  }
+  local fleet = car.ai.perception.fleet
+  if type(fleet) == "table" and type(fleet.vehicles) == "table" then
+    for _, vehicle in pairs(fleet.vehicles) do
+      if type(vehicle) == "table" then result.allied[tostring(vehicle.id or "")] = vehicle end
+    end
+  end
+  local traffic = car.ai.perception.traffic
+  if type(traffic) == "table" and type(traffic.traffic) == "table" then
+    for _, contact in pairs(traffic.traffic) do
+      local metrics = car.aiContactMetrics(position, heading, contact)
+      if metrics then
+        result.nearest = math.min(result.nearest, metrics.distance)
+        result.protectedNearby = result.protectedNearby or metrics.distance < stopDistance + 12
+        result.protectedBehind = result.protectedBehind or (metrics.behind and metrics.distance < metrics.halfLength + 5)
+        if metrics.collisionTime or metrics.distance < metrics.halfWidth + 1 then
+          result.hardStop = true
+          result.reason = string.upper(tostring(contact.kind or "PROTECTED"))
+        end
+      end
+    end
+  end
+  local ships = car.ai.perception.ships
+  if type(ships) == "table" and type(ships.ships) == "table" then
+    for _, contact in pairs(ships.ships) do
+      local metrics = car.aiContactMetrics(position, heading, contact)
+      if metrics then
+        metrics.allied = result.allied[tostring(contact.id or "")] ~= nil
+        result.nearest = math.min(result.nearest, metrics.distance)
+        if metrics.longitudinal > 0 and metrics.forwardSpeed < -0.5 and math.abs(metrics.lateral) < metrics.halfWidth + 4 then
+          result.oncoming = true
+        end
+        if metrics.ahead and metrics.longitudinal > 0 and (not result.lead or metrics.longitudinal < result.lead.longitudinal) then
+          result.lead = metrics
+        end
+        if metrics.collisionTime and metrics.collisionTime <= stopTime + 1.2 then
+          local mustYield = not metrics.allied or not car.ai.ownShipId or tonumber(contact.id) == nil or car.ai.ownShipId > tonumber(contact.id)
+          if mustYield or metrics.distance <= stopDistance then
+            result.hardStop = true
+            result.reason = metrics.allied and "YIELD FLEET" or "SHIP CONFLICT"
+          end
+        end
+        if metrics.ahead and metrics.speed < 0.3 and metrics.longitudinal < stopDistance + 15 then
+          result.stationaryBlock = metrics
+        end
+      end
+    end
+  end
+  if result.nearest == math.huge then result.nearest = nil end
+  return result
+end
+
+function car.aiChooseMode(geometry, traffic, distanceToDestination)
+  local scan = car.map.scan or {}
+  local confidence = tonumber(scan.confidence) or 0
+  local crosswalk = tonumber(scan.crosswalkDistance) or -1
+  local tunnel = (tonumber(scan.tunnelCells) or 0) > 0
+  if traffic.hardStop or traffic.lead or traffic.protectedNearby or traffic.oncoming or tunnel
+    or (crosswalk >= 0 and crosswalk < 24) or geometry.turnAngle > 0.28 or confidence < 0.55 then
+    return "normal", 7
+  end
+  if geometry.turnAngle < 0.06 and confidence >= 0.82 and distanceToDestination > 70
+    and not traffic.nearest and scan.loaded ~= false then
+    return "sport_plus", 14
+  end
+  return "sport", 10.5
+end
+
+function car.aiOvertakeOffset(traffic, geometry, now)
+  local overtake = car.ai.overtake
+  local width = car.aiDimensions()
+  local roadWidth = tonumber(car.map.scan and car.map.scan.estimatedWidth) or 12
+  local crosswalk = tonumber(car.map.scan and car.map.scan.crosswalkDistance) or -1
+  local tunnel = (tonumber(car.map.scan and car.map.scan.tunnelCells) or 0) > 0
+  local safeRoad = roadWidth >= width * 2 + 3 and geometry.turnAngle < 0.10 and not tunnel
+    and not (crosswalk >= 0 and crosswalk < 30) and not traffic.oncoming and not traffic.protectedNearby
+
+  if overtake.phase == "pass" then
+    if not safeRoad or traffic.hardStop then
+      overtake.phase = "return"
+      overtake.started = now
+    elseif now - overtake.started > 4.5 or not traffic.lead then
+      overtake.phase = "return"
+      overtake.started = now
+    end
+  elseif overtake.phase == "return" then
+    if now - overtake.started > 1.4 then
+      overtake.phase = nil
+      overtake.leadId = nil
+    end
+  elseif traffic.lead and traffic.lead.longitudinal > 7 and traffic.lead.longitudinal < 28
+    and traffic.lead.speed + 1.2 < math.max(4, speedBps) and safeRoad then
+    if overtake.leadId == traffic.lead.id then
+      overtake.followSince = overtake.followSince or now
+    else
+      overtake.leadId = traffic.lead.id
+      overtake.followSince = now
+    end
+    if now - overtake.followSince > 1.8 then
+      overtake.phase = "pass"
+      overtake.started = now
+      overtake.side = traffic.lead.lateral >= 0 and -1 or 1
+    end
+  else
+    overtake.followSince = nil
+    if not overtake.phase then overtake.leadId = nil end
+  end
+
+  if overtake.phase == "pass" then return overtake.side * math.min(4, math.max(2.5, width + 0.75)), "OVERTAKE" end
+  if overtake.phase == "return" then
+    local progress = clamp((now - overtake.started) / 1.4, 0, 1)
+    return overtake.side * math.min(4, math.max(2.5, width + 0.75)) * (1 - progress), "RETURN LANE"
+  end
+  return 0, nil
+end
+
+function car.aiOffsetTarget(position, target, offset)
+  if not target or math.abs(offset or 0) < 0.05 then return target end
+  local dx, dz = (tonumber(target.x) or position.x) - position.x, (tonumber(target.z) or position.z) - position.z
+  local length = math.sqrt(dx * dx + dz * dz)
+  if length < 0.01 then return target end
+  return { x = (tonumber(target.x) or position.x) - dz / length * offset, z = (tonumber(target.z) or position.z) + dx / length * offset }
+end
+
+function car.aiSetSteering(error, aggressive)
+  local deadzone = clamp((aggressive and 0.045 or 0.075) + speedBps * 0.008, 0.05, 0.20)
+  car.state.aHeld = error < -deadzone
+  car.state.dHeld = error > deadzone
+  car.autopilot.steering = car.state.aHeld and "LEFT" or (car.state.dHeld and "RIGHT" or "CENTER")
+end
+
+function car.aiRecoveryControl(now, headingError, traffic, shouldRecover)
+  local recovery = car.ai.recovery
+  if not recovery.phase and shouldRecover and recovery.attempts < 3 and not traffic.protectedBehind and not traffic.hardStop then
+    recovery.phase = "reverse"
+    recovery.started = now
+    recovery.attempts = recovery.attempts + 1
+    recovery.steer = headingError >= 0 and -1 or 1
+  end
+  if recovery.phase == "reverse" then
+    car.autopilot.behavior = "RECOVERY REVERSE"
+    car.autopilot.status = "RECOVERY REVERSE"
+    car.state.reverse = true
+    car.state.clutch = true
+    car.state.aHeld = recovery.steer < 0
+    car.state.dHeld = recovery.steer > 0
+    if now - recovery.started >= 1.05 then recovery.phase = "forward"; recovery.started = now end
+    return true
+  elseif recovery.phase == "forward" then
+    car.autopilot.behavior = "RECOVERY FORWARD"
+    car.autopilot.status = "RECOVERY FORWARD"
+    car.state.reverse = false
+    car.state.clutch = true
+    car.state.aHeld = recovery.steer > 0
+    car.state.dHeld = recovery.steer < 0
+    if now - recovery.started >= 1.35 then
+      recovery.phase = nil
+      car.ai.lastMovingAt = now
+      car.ai.lastProgressAt = now
+    end
+    return true
+  end
+  return false
 end
 
 function car.stopAutopilot(reason)
   car.autopilot.enabled = false
   car.autopilot.status = reason or "OFF"
+  car.autopilot.behavior = reason or "OFF"
   car.autopilot.targetSpeed = 0
   car.autopilot.steering = "CENTER"
+  car.autopilot.stoppingDistance = 0
+  car.ai.recovery.phase = nil
+  car.ai.overtake.phase = nil
   car.state.aHeld = false
   car.state.dHeld = false
+  car.state.reverse = car.state.reverseSelected
   car.state.clutch = car.cruiseOn
   car.applyOutputs()
 end
@@ -1268,12 +1643,22 @@ function car.setAutopilot(enabled)
   car.state.reverse = false
   car.autopilot.enabled = true
   car.autopilot.status = "READY"
+  car.autopilot.behavior = "READY"
+  car.ai.lastMovingAt = os.clock()
+  car.ai.lastProgressAt = os.clock()
+  car.ai.bestDestinationDistance = math.huge
+  car.ai.blockingId = nil
+  car.ai.blockingSince = nil
+  car.ai.recovery.phase = nil
+  car.ai.recovery.attempts = 0
+  car.ai.overtake.phase = nil
   car.markVehicleStateDirty()
   return true
 end
 
 function car.updateAutopilot()
   if not car.autopilot.enabled then return end
+  local now = os.clock()
   local position = car.vehicleWorldPosition()
   local points = car.routePoints()
   if not position or not points or #points < 1 then car.stopAutopilot("NO ROUTE"); return end
@@ -1288,6 +1673,7 @@ function car.updateAutopilot()
   local destination = car.map.destination
   local distanceToDestination = destination and math.sqrt((destination.x - position.x) ^ 2 + (destination.z - position.z) ^ 2) or math.huge
   if distanceToDestination <= 3 then car.stopAutopilot("ARRIVED"); return end
+  car.aiUpdateDynamics(now, distanceToDestination)
 
   local confidence = tonumber(car.map.scan and car.map.scan.confidence) or 0
   if confidence < 0.12 then
@@ -1299,7 +1685,8 @@ function car.updateAutopilot()
     return
   end
 
-  local target = car.routeTarget(position, points)
+  local geometry = car.aiRouteGeometry(position, points)
+  local target = geometry and geometry.target
   local targetX, targetZ = target and tonumber(target.x), target and tonumber(target.z)
   local heading = car.shipHeading()
   if not targetX or not targetZ or not heading then
@@ -1309,19 +1696,21 @@ function car.updateAutopilot()
     return
   end
 
-  local desiredHeading = car.atan2(targetZ - position.z, targetX - position.x)
-  local headingError = car.normalizeAngle(desiredHeading - heading)
-  local deadzone = clamp(0.08 + speedBps * 0.012, 0.08, 0.22)
-  car.state.aHeld = headingError < -deadzone
-  car.state.dHeld = headingError > deadzone
-  car.autopilot.steering = car.state.aHeld and "LEFT" or (car.state.dHeld and "RIGHT" or "CENTER")
+  car.aiUpdatePerception(position, heading, target)
+  local preliminaryStopDistance, preliminaryStopTime = car.aiStoppingModel(0)
+  local traffic = car.aiAssessTraffic(position, heading, preliminaryStopDistance, preliminaryStopTime)
+  local selectedMode, targetSpeed = car.aiChooseMode(geometry, traffic, distanceToDestination)
+  if car.driveMode ~= selectedMode then car.setDriveMode(selectedMode) end
+  car.autopilot.selectedMode = selectedMode == "normal" and "standard" or selectedMode
 
-  local targetSpeed = 7
+  local lateralAcceleration = selectedMode == "sport_plus" and 3.8 or (selectedMode == "sport" and 2.8 or 1.8)
+  local curveSpeed = math.sqrt(math.max(1, lateralAcceleration * geometry.turnRadius))
+  if geometry.turnAngle > 0.05 then targetSpeed = math.min(targetSpeed, curveSpeed) end
   local crosswalkDistance = tonumber(car.map.scan and car.map.scan.crosswalkDistance) or -1
   local tunnelCells = tonumber(car.map.scan and car.map.scan.tunnelCells) or 0
-  if crosswalkDistance >= 0 and crosswalkDistance < 14 then targetSpeed = math.min(targetSpeed, 3) end
+  if crosswalkDistance >= 0 and crosswalkDistance < 18 then targetSpeed = math.min(targetSpeed, 2.8) end
   if tunnelCells > 0 then targetSpeed = math.min(targetSpeed, 4.5) end
-  if math.abs(headingError) > 0.45 then targetSpeed = math.min(targetSpeed, 3.5) end
+  if geometry.turnAngle > 0.45 then targetSpeed = math.min(targetSpeed, 3.2) end
   if distanceToDestination < 16 then targetSpeed = math.min(targetSpeed, math.max(1.5, distanceToDestination * 0.35)) end
 
   local size = car.map.shipSize
@@ -1329,20 +1718,79 @@ function car.updateAutopilot()
   local roadWidth = tonumber(car.map.scan and car.map.scan.estimatedWidth) or 12
   if vehicleWidth > 0 and roadWidth > 0 and vehicleWidth + 1 > roadWidth then car.stopAutopilot("VEHICLE TOO WIDE"); return end
 
-  local obstacle = car.nearestObstacle(position)
-  car.autopilot.obstacleDistance = obstacle
-  local stopDistance = math.max(5, speedBps * 1.2 + (type(size) == "table" and (tonumber(size.length) or 0) * 0.5 or 0))
-  if obstacle and obstacle <= stopDistance then
-    targetSpeed = 0
-    car.autopilot.status = "OBSTACLE"
-  elseif obstacle and obstacle <= stopDistance + 8 then
-    targetSpeed = math.min(targetSpeed, 2.5)
-    car.autopilot.status = "CAUTION"
+  local offset, overtakeBehavior = car.aiOvertakeOffset(traffic, geometry, now)
+  local steeringTarget = car.aiOffsetTarget(position, target, offset)
+  local desiredHeading = car.atan2((tonumber(steeringTarget.z) or targetZ) - position.z, (tonumber(steeringTarget.x) or targetX) - position.x)
+  local headingError = car.normalizeAngle(desiredHeading - heading)
+
+  if traffic.lead and not overtakeBehavior then
+    local followingSpeed = math.max(0, traffic.lead.speed - clamp((12 - traffic.lead.longitudinal) * 0.18, 0, 2.5))
+    targetSpeed = math.min(targetSpeed, followingSpeed)
+  end
+  if traffic.hardStop then targetSpeed = 0 end
+
+  local stopDistance, stopTime = car.aiStoppingModel(targetSpeed)
+  car.autopilot.stoppingDistance = stopDistance
+  car.autopilot.stoppingTime = stopTime
+  car.autopilot.obstacleDistance = traffic.nearest
+
+  if traffic.stationaryBlock then
+    if car.ai.blockingId ~= traffic.stationaryBlock.id then
+      car.ai.blockingId = traffic.stationaryBlock.id
+      car.ai.blockingSince = now
+    elseif now - (car.ai.blockingSince or now) > 3.5 and now - car.ai.lastDetour > 4 then
+      car.ai.lastDetour = now
+      local contact = traffic.stationaryBlock.contact
+      local avoidRadius = math.max(5, (tonumber(contact.width) or 2) + (tonumber(contact.length) or 4) * 0.5 + 2)
+      if car.updateRoute(true, { x = contact.x, z = contact.z, radius = avoidRadius }) then
+        car.autopilot.status = "DETOUR"
+        car.autopilot.behavior = "DETOUR"
+        points = car.routePoints() or points
+      end
+    end
   else
-    car.autopilot.status = "ACTIVE"
+    car.ai.blockingId = nil
+    car.ai.blockingSince = nil
+  end
+
+  local shouldRecover = car.state.clutch and targetSpeed > 1.5 and speedBps < 0.18
+    and now - car.ai.lastMovingAt > 2.8 and now - car.ai.lastProgressAt > 2.8
+    and not traffic.stationaryBlock
+  if car.aiRecoveryControl(now, headingError, traffic, shouldRecover) then
+    car.autopilot.targetSpeed = 1.5
+    car.applyOutputs()
+    return
+  end
+
+  car.state.reverse = false
+  car.aiSetSteering(headingError, overtakeBehavior ~= nil)
+  if traffic.hardStop then
+    car.autopilot.status = traffic.reason or "BRAKE"
+    car.autopilot.behavior = "EMERGENCY STOP"
+  elseif overtakeBehavior then
+    car.autopilot.status = overtakeBehavior
+    car.autopilot.behavior = overtakeBehavior
+  elseif traffic.lead then
+    car.autopilot.status = "FOLLOW"
+    car.autopilot.behavior = "FOLLOW"
+  elseif targetSpeed < 1 then
+    car.autopilot.status = "HOLD"
+    car.autopilot.behavior = "HOLD"
+  elseif geometry.turnAngle > 0.18 then
+    car.autopilot.status = "CORNER"
+    car.autopilot.behavior = "CORNER"
+  else
+    car.autopilot.status = "CRUISE"
+    car.autopilot.behavior = "CRUISE"
   end
   car.autopilot.targetSpeed = targetSpeed
-  car.state.clutch = targetSpeed > 0 and speedBps < targetSpeed - 0.25
+  if targetSpeed <= 0.05 then
+    car.state.clutch = false
+  elseif speedBps < targetSpeed - 0.35 then
+    car.state.clutch = true
+  elseif speedBps > targetSpeed + 0.15 then
+    car.state.clutch = false
+  end
   car.applyOutputs()
 end
 
@@ -2944,7 +3392,8 @@ function car.drawMap(y0)
   local scan = car.map.scan
   local status = car.map.error
   if not status and car.autopilot.enabled then
-    status = "AUTO " .. tostring(car.autopilot.status) .. "  " .. fmt(car.autopilot.targetSpeed, 1) .. " b/s"
+    status = "AI " .. tostring(car.autopilot.status) .. "  " .. tostring(car.autopilot.selectedMode):upper()
+      .. "  " .. fmt(car.autopilot.targetSpeed, 1) .. " b/s  STOP " .. fmt(car.autopilot.stoppingDistance, 1)
   elseif not status and car.map.destination then
     status = "Destination " .. math.floor(car.map.destination.x) .. ", " .. math.floor(car.map.destination.z)
   elseif not status then
@@ -3002,6 +3451,25 @@ function car.drawMap(y0)
           previousX, previousY = sx, sy
         else
           previousX, previousY = nil, nil
+        end
+      end
+    end
+
+    local ships = car.ai.perception.ships
+    if type(ships) == "table" and type(ships.ships) == "table" then
+      for _, contact in pairs(ships.ships) do
+        if type(contact) == "table" then
+          local sx, sy = car.mapProject(tonumber(contact.x) or 0, tonumber(contact.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
+          if sx and sy then writeAt(centerWin, sx, sy, "V", colors.white, colors.orange) end
+        end
+      end
+    end
+    local protectedTraffic = car.ai.perception.traffic
+    if type(protectedTraffic) == "table" and type(protectedTraffic.traffic) == "table" then
+      for _, contact in pairs(protectedTraffic.traffic) do
+        if type(contact) == "table" then
+          local sx, sy = car.mapProject(tonumber(contact.x) or 0, tonumber(contact.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
+          if sx and sy then writeAt(centerWin, sx, sy, "!", colors.white, colors.red) end
         end
       end
     end
