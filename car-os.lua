@@ -16,7 +16,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.5.1"
+local VERSION = _G.ROADROVER_VERSION or "2.5.2"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -119,7 +119,7 @@ local car = {
   engineOn = false,
   pulseTimer = nil,
   suspensionTimer = nil,
-  suspensionFallbackSeconds = 0.35,
+  suspensionFallbackSeconds = 0.7,
   cruiseOn = false,
   driveMode = "normal",
   animations = {
@@ -1866,7 +1866,7 @@ end
 
 local tabs = {
   { id = "home", title = "Home", label = "Home", page = 1 },
-  { id = "settings", title = "Settings", label = "Set", page = 1 },
+  { id = "settings", title = "Settings", label = "Settings", page = 1 },
   { id = "stats", title = "Statistics", label = "Stats", page = 1 },
   { id = "map", title = "Map", label = "Map", page = 2 },
   { id = "about", title = "About", label = "About", page = 2 },
@@ -2191,23 +2191,24 @@ local function drawVertical(...)
 end
 
 function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX, modeW)
+  local navigationH = layout.hdCompact and math.min(availableH, 7) or availableH
   if quickW > 0 then
-    fillRect(centerWin, mapX, top, quickW, availableH, COLORS.panel)
-    drawVerticalLabel(centerWin, mapX, top, quickW, availableH, "MAP", COLORS.panelText, COLORS.panel)
+    fillRect(centerWin, mapX, top, quickW, navigationH, COLORS.panel)
+    drawVerticalLabel(centerWin, mapX, top, quickW, navigationH, "MAP", COLORS.panelText, COLORS.panel)
     quickMapBox = {
       x1 = layout.centerX + mapX - 1,
       y1 = top,
       x2 = layout.centerX + mapX + quickW - 2,
-      y2 = layout.h
+      y2 = top + navigationH - 1
     }
 
-    fillRect(centerWin, settingsX, top, quickW, availableH, COLORS.panel)
-    drawVerticalLabel(centerWin, settingsX, top, quickW, availableH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
+    fillRect(centerWin, settingsX, top, quickW, navigationH, COLORS.panel)
+    drawVerticalLabel(centerWin, settingsX, top, quickW, navigationH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
     quickSettingsBox = {
       x1 = layout.centerX + settingsX - 1,
       y1 = top,
       x2 = layout.centerX + settingsX + quickW - 2,
-      y2 = layout.h
+      y2 = top + navigationH - 1
     }
   end
 
@@ -2217,11 +2218,11 @@ function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX,
     { id = "sport_plus", label = "S+", active = car.state.mode == "sport_plus" }
   }
   local modeGap = 1
-  local modeH = math.max(2, math.floor((availableH - modeGap * 2) / 3))
+  local modeH = layout.hdCompact and 2 or math.max(2, math.floor((availableH - modeGap * 2) / 3))
   for index = 1, #modes do
     local mode = modes[index]
     local y = top + (index - 1) * (modeH + modeGap)
-    local height = index == #modes and layout.h - y + 1 or modeH
+    local height = layout.hdCompact and modeH or (index == #modes and layout.h - y + 1 or modeH)
     local text = trim(mode.label, math.max(1, modeW - (mode.active and 0 or 2)))
     car.drawAnimatedButton(centerWin, modeX, y, modeW, height, "mode:" .. mode.id, text, nil, mode.active, COLORS.activeBg, COLORS.panel)
     car.driveBoxes[mode.id] = {
@@ -2238,18 +2239,17 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
   local columns = layout.hdCompact and 4 or 2
   local rows = layout.hdCompact and 2 or 4
   local buttonGap = availableH < 11 and 0 or 1
-  local buttonW = math.floor((controlsW - buttonGap) / columns)
-  local buttonH = math.max(1, math.floor((availableH - buttonGap * (rows - 1)) / rows))
-  if layout.hdCompact then buttonH = math.min(4, buttonH) end
+  local buttonW = math.floor((controlsW - buttonGap * (columns - 1)) / columns)
+  local buttonH = layout.hdCompact and 3 or math.max(1, math.floor((availableH - buttonGap * (rows - 1)) / rows))
   local controls = {
-    { id = "work_engine", title = "WORKSHOP", status = car.state.workshopEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.workshopEngineOff },
-    { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.driveEngineOff },
+    { id = "work_engine", title = "SHOP", status = car.state.workshopEngineOff and "OFF" or "ON", active = car.state.workshopEngineOff },
+    { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "OFF" or "ON", active = car.state.driveEngineOff },
     { id = "cruise", title = "CRUISE", status = car.cruiseOn and "ON" or "OFF", active = car.cruiseOn },
     { id = "front_drive", title = "TRACTION", status = car.state.frontDriveOff and "2WD" or "AWD", active = not car.state.frontDriveOff },
-    { id = "boost", title = "WORKSHOP", status = car.state.workshopBoost and "BOOST ON" or "BOOST OFF", active = car.state.workshopBoost },
+    { id = "boost", title = "BOOST", status = car.state.workshopBoost and "ON" or "OFF", active = car.state.workshopBoost },
     { id = "headlights", title = "LIGHTS", status = car.state.lighting == "headlights" and "ON" or "OFF", active = car.state.lighting == "headlights" },
-    { id = "suspension_up", title = "/\\", status = "HEIGHT", active = car.state.suspension == "up" },
-    { id = "suspension_down", title = "\\/", status = "HEIGHT", active = car.state.suspension == "down" }
+    { id = "suspension_up", title = "/\\", status = car.state.suspension == "up" and "ACTIVE" or "HOLD", active = car.state.suspension == "up" },
+    { id = "suspension_down", title = "\\/", status = car.state.suspension == "down" and "ACTIVE" or "HOLD", active = car.state.suspension == "down" }
   }
   for index = 1, #controls do
     local control = controls[index]
@@ -2258,7 +2258,7 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
     local x = controlsX + (column - 1) * (buttonW + buttonGap)
     local y = top + (row - 1) * (buttonH + buttonGap)
     local width = column == columns and layout.centerW - x + 1 or buttonW
-    local height = row == rows and layout.h - y + 1 or buttonH
+    local height = math.min(buttonH, layout.h - y + 1)
     if width >= 1 and height >= 1 then
       local line1 = trim(height == 1 and control.status or control.title, math.max(1, width - 2))
       local line2 = trim(control.status, math.max(1, width - 2))
@@ -2292,8 +2292,8 @@ local function drawHome(y0)
   local top = math.max(2, y0)
   local availableH = math.max(1, layout.h - top + 1)
   local gap = 1
-  local quickW = layout.compact and 0 or (layout.centerW >= 32 and 3 or 2)
-  local modeW = layout.centerW >= 32 and 4 or 3
+  local quickW = layout.compact and 0 or (layout.hdCompact and 2 or (layout.centerW >= 32 and 3 or 2))
+  local modeW = layout.hdCompact and 3 or (layout.centerW >= 32 and 4 or 3)
   local mapX = 1
   local settingsX = mapX + quickW + gap
   local modeX = quickW > 0 and (settingsX + quickW + gap) or 1
@@ -2530,7 +2530,7 @@ function car.drawDrive(y0)
   local gapX = 1
   local gapY = 1
   local columns = layout.hdCompact and (layout.centerW >= 64 and 5 or 4) or 3
-  local buttonH = layout.hdCompact and 3 or 2
+  local buttonH = 2
   local availableH = layout.h - y0 + 1
   if availableH < 16 then
     buttonH = 1
@@ -2694,7 +2694,7 @@ local function drawRightTabs(pageTabs, l)
 
     local t = pageTabs[i].tab
     local active = (pageTabs[i].idx == activeTab)
-    local label = trim((layout.hdCompact and t.title) or t.label or t.title or "", math.max(1, l.tabW - 2))
+    local label = trim(t.label or t.title or "", math.max(1, l.tabW - 2))
     car.drawAnimatedButton(rightWin, l.tabsX, y, l.tabW, l.tabH, "sidebar:" .. t.id, label, nil, active, COLORS.activeBg, COLORS.panel)
 
     tabBoxes[#tabBoxes + 1] = {
@@ -3045,7 +3045,7 @@ function car.handlePointer(mx, my, isDown, supportsRelease)
   if direction then
     car.bumpAnimation("home:" .. id)
     car.bumpAnimation("drive:" .. id)
-    return car.setSuspension(direction, not supportsRelease)
+    return car.setSuspension(direction, true)
   end
   return handleClick(mx, my)
 end

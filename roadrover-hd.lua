@@ -406,10 +406,10 @@ return function(car, context)
     car.hd.width = math.floor(detectedWidth)
     car.hd.height = math.floor(detectedHeight)
     car.hd.profile = hdProfile
-    terminalState.cellWidth = hdProfile and tonumber(hdProfile.terminalCellWidth)
-      or (compactFont and tonumber(compactFont.cellWidth)) or 6
-    terminalState.cellHeight = hdProfile and tonumber(hdProfile.terminalCellHeight)
-      or (compactFont and tonumber(compactFont.cellHeight)) or 8
+    terminalState.cellWidth = (compactFont and tonumber(compactFont.cellWidth))
+      or (hdProfile and tonumber(hdProfile.terminalCellWidth)) or 6
+    terminalState.cellHeight = (compactFont and tonumber(compactFont.cellHeight))
+      or (hdProfile and tonumber(hdProfile.terminalCellHeight)) or 8
     terminalState.width = math.max(1, math.floor(car.hd.width / terminalState.cellWidth))
     terminalState.height = math.max(1, math.floor(car.hd.height / terminalState.cellHeight))
     terminalState.offsetX = math.floor((car.hd.width - terminalState.width * terminalState.cellWidth) / 2) + 1
