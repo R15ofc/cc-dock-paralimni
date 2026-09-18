@@ -16,7 +16,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.2"
+local VERSION = _G.ROADROVER_VERSION or "2.7.3"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -139,6 +139,7 @@ local car = {
     shipSize = nil,
     destination = nil,
     error = nil,
+    notice = nil,
     lastUpdate = -1e9,
     lastRoute = -1e9,
     viewport = nil,
@@ -1160,7 +1161,16 @@ end
 
 function car.telemetryPort()
   local port = car.devices.port
-  if port and type(port.scanRoad) == "function" and type(port.getRoadMap) == "function" then return port end
+  if port and type(port.scanRoad) == "function" then return port end
+  if peripheral and type(peripheral.getNames) == "function" then
+    local ok, names = pcall(peripheral.getNames)
+    if ok and type(names) == "table" then
+      for index = 1, #names do
+        local wrapped = peripheral.wrap(names[index])
+        if wrapped and type(wrapped.scanRoad) == "function" then return wrapped end
+      end
+    end
+  end
   return nil
 end
 
@@ -1204,7 +1214,16 @@ end
 function car.updateMap(force)
   local port = car.telemetryPort()
   if not port then
-    car.map.error = "Tweaked Tweaks telemetry is unavailable"
+    local version = nil
+    local primary = car.devices.port
+    if primary and type(primary.getTweakedTweaksInfo) == "function" then
+      local infoOK, info = pcall(primary.getTweakedTweaksInfo)
+      if infoOK and type(info) == "table" then version = tostring(info.version or "") end
+    end
+    car.map.error = version and version ~= ""
+      and ("Server mod " .. version .. " has no road map API")
+      or "Install Tweaked Tweaks on the server"
+    car.map.notice = nil
     return false
   end
   local now = os.clock()
@@ -1213,6 +1232,7 @@ function car.updateMap(force)
   local scanOK, scan = pcall(port.scanRoad, 24)
   if not scanOK or type(scan) ~= "table" or scan.available ~= true then
     car.map.error = tostring((type(scan) == "table" and scan.error) or scan or "Road scan failed")
+    car.map.notice = nil
     return false
   end
   car.map.scan = scan
@@ -1223,12 +1243,25 @@ function car.updateMap(force)
   local centerZ = vehicleZ + car.map.panZ
   local radius = car.map.zooms[car.map.zoomIndex] or 32
   local step = radius <= 32 and 1 or (radius <= 64 and 2 or (radius <= 128 and 4 or 8))
-  local viewOK, view = pcall(port.getRoadMap, centerX, centerZ, radius, step)
-  if viewOK and type(view) == "table" and view.available == true then
-    car.map.view = view
-    car.map.error = nil
-  else
-    car.map.error = tostring((type(view) == "table" and view.error) or view or "Map request failed")
+  car.map.view = {
+    available = true,
+    center = { x = vehicleX, y = tonumber(vehicle.y) or 0, z = vehicleZ },
+    vehicle = { x = vehicleX, y = tonumber(vehicle.y) or 0, z = vehicleZ },
+    radius = tonumber(scan.radius) or 24,
+    step = 1,
+    sharedCells = tonumber(scan.sharedCells) or 0,
+    samples = type(scan.samples) == "table" and scan.samples or {}
+  }
+  car.map.error = nil
+  car.map.notice = "LOCAL SCAN"
+  if type(port.getRoadMap) == "function" then
+    local viewOK, view = pcall(port.getRoadMap, centerX, centerZ, radius, step)
+    if viewOK and type(view) == "table" and view.available == true then
+      car.map.view = view
+      car.map.notice = nil
+    else
+      car.map.notice = "LOCAL SCAN - SHARED MAP UNAVAILABLE"
+    end
   end
   if type(port.readBus) == "function" then
     local telemetryOK, telemetry = pcall(port.readBus)
@@ -1948,9 +1981,13 @@ local function rebuildUI()
   local w, h = term.getSize()
   local compact = w < 48 or h < 12
   local hdCompact = car.hd.ready and w >= 64 and h >= 16
+  local hdDense = car.hd.ready and w >= 88 and h >= 28
   local leftW
   local rightW
-  if hdCompact then
+  if hdDense then
+    leftW = 10
+    rightW = 9
+  elseif hdCompact then
     leftW = clamp(math.floor(w * 0.15), 11, 14)
     rightW = clamp(math.floor(w * 0.15), 10, 14)
   else
@@ -1974,7 +2011,8 @@ local function rebuildUI()
     leftW = leftW, centerW = centerW, rightW = rightW,
     monW = leftW, rightMonitorW = rightW,
     compact = compact,
-    hdCompact = hdCompact
+    hdCompact = hdCompact,
+    hdDense = hdDense
   }
 end
 
@@ -2947,7 +2985,8 @@ local function drawVertical(...)
 end
 
 function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX, modeW)
-  local navigationH = layout.hdCompact and math.min(availableH, 7) or availableH
+  local navigationH = layout.hdDense and math.min(availableH, 5)
+    or (layout.hdCompact and math.min(availableH, 7) or availableH)
   if quickW > 0 then
     fillRect(centerWin, mapX, top, quickW, navigationH, COLORS.panel)
     drawVerticalLabel(centerWin, mapX, top, quickW, navigationH, "MAP", COLORS.panelText, COLORS.panel)
@@ -2974,7 +3013,8 @@ function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX,
     { id = "sport_plus", label = "S+", active = car.state.mode == "sport_plus" }
   }
   local modeGap = 1
-  local modeH = layout.hdCompact and 2 or math.max(2, math.floor((availableH - modeGap * 2) / 3))
+  local modeH = layout.hdDense and 1
+    or (layout.hdCompact and 2 or math.max(2, math.floor((availableH - modeGap * 2) / 3)))
   for index = 1, #modes do
     local mode = modes[index]
     local y = top + (index - 1) * (modeH + modeGap)
@@ -2996,7 +3036,8 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
   local rows = layout.hdCompact and 2 or 4
   local buttonGap = availableH < 11 and 0 or 1
   local buttonW = math.floor((controlsW - buttonGap * (columns - 1)) / columns)
-  local buttonH = layout.hdCompact and 3 or math.max(1, math.floor((availableH - buttonGap * (rows - 1)) / rows))
+  local buttonH = layout.hdDense and 2
+    or (layout.hdCompact and 3 or math.max(1, math.floor((availableH - buttonGap * (rows - 1)) / rows)))
   local controls = {
     { id = "work_engine", title = "SHOP", status = car.state.workshopEngineOff and "OFF" or "ON", active = car.state.workshopEngineOff },
     { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "OFF" or "ON", active = car.state.driveEngineOff },
@@ -3391,7 +3432,7 @@ function car.drawMap(y0)
 
   local view = car.map.view
   local scan = car.map.scan
-  local status = car.map.error
+  local status = car.map.error or car.map.notice
   if not status and car.autopilot.enabled then
     status = "AI " .. tostring(car.autopilot.status) .. "  " .. tostring(car.autopilot.selectedMode):upper()
       .. "  " .. fmt(car.autopilot.targetSpeed, 1) .. " b/s  STOP " .. fmt(car.autopilot.stoppingDistance, 1)
