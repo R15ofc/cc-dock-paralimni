@@ -14,11 +14,9 @@ local BASE_ENGINE_SIDE = _G.ENGINE_SIDE or "bottom"
 local BASE_DRIVE_SIDE = _G.DRIVE_SIDE or "left"
 local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
-local BIGFONT_ID = "3LfWxRWh"
-local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.7"
+local VERSION = _G.ROADROVER_VERSION or "2.4.8"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -500,31 +498,22 @@ local function loadBigFont()
   if not ensureUserReady() then return nil end
   bigfontTried = true
 
+  local bundledPath = (SCRIPT_DIR ~= "" and fs.combine(SCRIPT_DIR, "roadrover-bigfont.lua")) or "roadrover-bigfont.lua"
+  if fs.exists(bundledPath) then
+    local loaded, library = pcall(dofile, bundledPath)
+    if loaded and type(library) == "table" then bigfont = library; return library end
+  end
+
   if fs.exists(BIGFONT_FILE) then
     local ok, lib = pcall(dofile, BIGFONT_FILE)
     if ok and type(lib) == "table" then bigfont = lib; return lib end
-  end
-
-  if http and http.get then
-    local ok, res = pcall(function() return http.get(BIGFONT_URL) end)
-    if ok and res then
-      local code = res.readAll()
-      res.close()
-      if type(code) == "string" and #code > 0 then
-        local h = fs.open(BIGFONT_FILE, "w")
-        if h then h.write(code); h.close() end
-        local ok2, lib = pcall(load, code, "bigfont", "t", _ENV)
-        if ok2 and type(lib) == "table" then bigfont = lib; return lib end
-        local ok3, lib2 = pcall(dofile, BIGFONT_FILE)
-        if ok3 and type(lib2) == "table" then bigfont = lib2; return lib2 end
-      end
-    end
   end
 
   return nil
 end
 
 local function bigTextWidth(text)
+  if bigfont and type(bigfont.width) == "function" then return bigfont.width(text) end
   local n = #tostring(text or "")
   if n <= 0 then return 0 end
   return n * 4 - 1
@@ -696,6 +685,7 @@ function car.scanDevices(force)
   local previousPortName = car.devices.portName
   local previousSecondaryPortName = car.devices.secondaryPortName
   local portCandidates = {}
+  local directSides = { top = 1, bottom = 2, left = 3, right = 4, front = 5, back = 6 }
   car.devices.portName, car.devices.port = nil, nil
   car.devices.secondaryPortName, car.devices.secondaryPort = nil, nil
   car.devices.keyboardName, car.devices.keyboard = nil, nil
@@ -719,7 +709,12 @@ function car.scanDevices(force)
       end
     end
   end
-  table.sort(portCandidates, function(first, second) return first.name < second.name end)
+  table.sort(portCandidates, function(first, second)
+    local firstRank = directSides[first.name] or 100
+    local secondRank = directSides[second.name] or 100
+    if firstRank ~= secondRank then return firstRank < secondRank end
+    return first.name < second.name
+  end)
   if portCandidates[1] then
     car.devices.portName, car.devices.port = portCandidates[1].name, portCandidates[1].device
   end
@@ -1761,7 +1756,7 @@ local function drawSpeedBig(win, x, y, num, bf)
     term.redirect(prev)
   end
 
-  return 5
+  return tonumber(bf.height) or 3
 end
 
 local function drawBigLabel(win, x, y, text, bg, fg, bf)
@@ -1780,16 +1775,17 @@ local function drawQuickActionsBlock(bigX, bigY, bigW, bigH)
   local l1 = "Quick"
   local l2 = "Actions"
   local bf = loadBigFont()
+  local fontHeight = bf and tonumber(bf.height) or 3
   local canBig = bf and type(bf.bigWrite) == "function"
     and bigTextWidth(l1) <= bigW and bigTextWidth(l2) <= bigW
-    and bigH >= 10
+    and bigH >= fontHeight * 2
   if canBig then
-    local totalH = 10
+    local totalH = fontHeight * 2
     local ty = bigY + math.floor((bigH - totalH) / 2)
     local x1 = bigX + math.floor((bigW - bigTextWidth(l1)) / 2)
     local x2 = bigX + math.floor((bigW - bigTextWidth(l2)) / 2)
     drawBigLabel(centerWin, x1, ty, l1, COLORS.panel, COLORS.panelText, bf)
-    drawBigLabel(centerWin, x2, ty + 5, l2, COLORS.panel, COLORS.panelText, bf)
+    drawBigLabel(centerWin, x2, ty + fontHeight, l2, COLORS.panel, COLORS.panelText, bf)
   else
     local ty = bigY + math.floor((bigH - 2) / 2)
     writeAt(centerWin, bigX + math.floor((bigW - #l1) / 2), ty, l1, COLORS.panelText, COLORS.panel)
@@ -1961,7 +1957,7 @@ local function drawLeft()
   local bw = canBig and bigTextWidth(num) or #num
   local bx = math.max(1, math.floor((layout.leftW - bw) / 2) + 1)
 
-  local bigH = canBig and 5 or 1
+  local bigH = canBig and (tonumber(bf.height) or 3) or 1
   local by = math.floor((layout.h - bigH) / 2) + SPEED_Y_OFFSET
   if by < 3 then by = 3 end
 
@@ -1974,7 +1970,7 @@ local function drawLeft()
   local unitText = "kmh"
   if settings.units == "MP/H" then unitText = "mph"
   elseif settings.units == "B/S" then unitText = "bs" end
-  local uy = by + bigH + (canBig and UNIT_Y_OFFSET or 0)
+  local uy = by + bigH
   if uy < 1 then uy = 1 end
   if uy <= layout.h then
     local ux = math.max(1, math.floor((layout.leftW - #unitText) / 2) + 1)
@@ -2454,6 +2450,10 @@ function car.drawDrive(y0)
     local keyboardStatus = car.devices.keyboardName and ("Keyboard: " .. car.devices.keyboardName) or "Keyboard: not found"
     writeAt(centerWin, 2, statusY + 1, trim(car.devices.error or keyboardStatus, layout.centerW - 2), car.devices.error and colors.red or COLORS.fg, COLORS.bg)
   end
+  if statusY + 2 <= layout.h then
+    local secondaryStatus = car.devices.secondaryPortName and ("Port 2: " .. car.devices.secondaryPortName) or "Port 2: not connected"
+    writeAt(centerWin, 2, statusY + 2, trim(secondaryStatus, layout.centerW - 2), car.devices.secondaryPortName and COLORS.fg or colors.red, COLORS.bg)
+  end
 end
 
 local function drawComingSoon(y0)
@@ -2612,6 +2612,7 @@ function car.loadHDRenderer()
   if not loaded or type(attach) ~= "function" then car.hd.error = tostring(attach); return false end
   local attached, attachError = pcall(attach, car, {
     version = VERSION,
+    scriptDir = SCRIPT_DIR,
     tabs = tabs,
     settings = settings,
     stats = stats,
@@ -2873,6 +2874,14 @@ end
 
 function car.keyName(code)
   if type(code) == "string" then return code:lower() end
+  if keys then
+    local fixed = {
+      [keys.w] = "w", [keys.s] = "s", [keys.a] = "a", [keys.d] = "d",
+      [keys.f] = "f", [keys.g] = "g", [keys.l] = "l",
+      [keys.z] = "z", [keys.c] = "c", [keys.x] = "x"
+    }
+    if fixed[code] then return fixed[code] end
+  end
   if keys and keys.getName then
     local ok, name = pcall(keys.getName, code)
     if ok and name then return tostring(name):lower() end

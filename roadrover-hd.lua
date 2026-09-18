@@ -37,6 +37,16 @@ return function(car, context)
     dirty = true
   }
   local gpuTerminal
+  local compactFont
+
+  do
+    local base = tostring(context.scriptDir or "")
+    local path = base ~= "" and fs.combine(base, "roadrover-font.lua") or "roadrover-font.lua"
+    if fs.exists(path) then
+      local loaded, library = pcall(dofile, path)
+      if loaded and type(library) == "table" and type(library.drawText) == "function" then compactFont = library end
+    end
+  end
 
   for color, rgb in pairs(COLOR_RGB) do terminalState.palette[color] = rgb end
 
@@ -84,6 +94,7 @@ return function(car, context)
   local function textLength(text)
     local gpu = car.devices.gpu
     text = tostring(text or "")
+    if compactFont and type(compactFont.measure) == "function" then return compactFont.measure(text) end
     if gpu and type(gpu.getTextLength) == "function" then
       local ok, width = pcall(gpu.getTextLength, text, 1, 1)
       if ok and tonumber(width) then return math.max(0, math.floor(width)) end
@@ -106,6 +117,7 @@ return function(car, context)
     )
     while #text > 0 and textLength(text) > maxWidth do text = text:sub(1, -2) end
     if text == "" or maxWidth <= 0 then return true end
+    if compactFont then return compactFont.drawText(fillPixels, x, y, text, rgb, maxWidth) end
     local ok, err = pcall(gpu.drawText, x, y, text, signedARGB(rgb), -1, 1, 1)
     if not ok then car.hd.error = tostring(err) end
     return ok
@@ -379,8 +391,8 @@ return function(car, context)
     end
     car.hd.width = math.floor(detectedWidth)
     car.hd.height = math.floor(detectedHeight)
-    terminalState.cellWidth = 6
-    terminalState.cellHeight = 8
+    terminalState.cellWidth = compactFont and tonumber(compactFont.cellWidth) or 6
+    terminalState.cellHeight = compactFont and tonumber(compactFont.cellHeight) or 8
     terminalState.width = math.max(1, math.floor(car.hd.width / terminalState.cellWidth))
     terminalState.height = math.max(1, math.floor(car.hd.height / terminalState.cellHeight))
     terminalState.offsetX = math.floor((car.hd.width - terminalState.width * terminalState.cellWidth) / 2) + 1
