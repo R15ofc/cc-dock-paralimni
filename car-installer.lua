@@ -1,4 +1,4 @@
-local RELEASE = "89cbd34813bf6baa73cb8e56bb31ffb78f319c71"
+local RELEASE = "b313872ac4d81f5a232ef0811a7c6224f434b046"
 local RELEASE_BASE = "https://raw.githubusercontent.com/R15ofc/cc-dock-paralimni/" .. RELEASE .. "/"
 local SOURCE = RELEASE_BASE .. "car-os.lua"
 local HD_SOURCE = RELEASE_BASE .. "roadrover-hd.lua"
