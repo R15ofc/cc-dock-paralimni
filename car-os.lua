@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.6"
+local VERSION = _G.ROADROVER_VERSION or "2.4.7"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -1067,7 +1067,8 @@ local function tick()
   debugInfo.d = d
 end
 
-local ui = term.current()
+local nativeTerm = term.current()
+local ui = nativeTerm
 local leftWin, centerWin, rightWin
 local layout = {}
 
@@ -1099,10 +1100,10 @@ local function rebuildUI()
   term.redirect(ui)
 
   local w, h = term.getSize()
-  local monW = math.floor(w / 3)
-  local leftW = monW
-  local rightMonitorW = math.max(1, w - (2 * monW))
-  local rightW = clamp(math.floor(rightMonitorW * 0.22), 6, math.min(10, rightMonitorW))
+  local compact = w < 48 or h < 12
+  local leftW = compact and clamp(math.floor(w * 0.25), 7, math.max(7, w - 12)) or math.floor(w / 3)
+  local rightW = compact and clamp(math.floor(w * 0.16), 5, math.max(5, w - leftW - 8))
+    or clamp(math.floor(math.max(1, w - (2 * math.floor(w / 3))) * 0.22), 6, 10)
   local centerW = w - leftW - rightW
 
   local leftX = 1
@@ -1117,11 +1118,23 @@ local function rebuildUI()
     w = w, h = h,
     leftX = leftX, centerX = centerX, rightX = rightX,
     leftW = leftW, centerW = centerW, rightW = rightW,
-    monW = monW, rightMonitorW = rightMonitorW
+    monW = leftW, rightMonitorW = rightW,
+    compact = compact
   }
 end
 
 local function writeAt(win, x, y, s, fg, bg)
+  local winW, winH = win.getSize()
+  x = math.floor(tonumber(x) or 1)
+  y = math.floor(tonumber(y) or 1)
+  s = tostring(s or "")
+  if y < 1 or y > winH or x > winW or s == "" then return end
+  if x < 1 then
+    s = s:sub(2 - x)
+    x = 1
+  end
+  s = s:sub(1, math.max(0, winW - x + 1))
+  if s == "" then return end
   win.setCursorPos(x, y)
   win.setBackgroundColor(bg or COLORS.bg)
   win.setTextColor(fg or COLORS.fg)
@@ -1135,6 +1148,16 @@ local function clearWin(win, bg, fg)
 end
 
 local function fillRect(win, x, y, w, h, bg)
+  local winW, winH = win.getSize()
+  x = math.floor(tonumber(x) or 1)
+  y = math.floor(tonumber(y) or 1)
+  w = math.floor(tonumber(w) or 0)
+  h = math.floor(tonumber(h) or 0)
+  if x < 1 then w = w - (1 - x); x = 1 end
+  if y < 1 then h = h - (1 - y); y = 1 end
+  w = math.min(w, winW - x + 1)
+  h = math.min(h, winH - y + 1)
+  if w <= 0 or h <= 0 then return end
   bg = bg or COLORS.bg
   if paintutils and paintutils.drawFilledBox then
     local prev = term.current()
@@ -1385,6 +1408,7 @@ local function promptRRID(title, allowCancel)
       writeAt(ui, sx + math.floor((cancelW - 6) / 2), y, "CANCEL", COLORS.panelText, COLORS.panel)
       addBox("CANCEL", sx, y, cancelW, keyH)
     end
+    if car.flushHD then car.flushHD() end
   end
 
   local function applyInputAdd(ch)
@@ -1577,6 +1601,7 @@ local function promptSelectRRID(list)
         y2 = y
       }
     end
+    if car.flushHD then car.flushHD() end
   end
 
   local function hitBox(b, x, y)
@@ -1949,7 +1974,7 @@ local function drawLeft()
   local unitText = "kmh"
   if settings.units == "MP/H" then unitText = "mph"
   elseif settings.units == "B/S" then unitText = "bs" end
-  local uy = by + bigH + UNIT_Y_OFFSET
+  local uy = by + bigH + (canBig and UNIT_Y_OFFSET or 0)
   if uy < 1 then uy = 1 end
   if uy <= layout.h then
     local ux = math.max(1, math.floor((layout.leftW - #unitText) / 2) + 1)
@@ -2005,23 +2030,25 @@ local function drawVertical(...)
 end
 
 function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX, modeW)
-  fillRect(centerWin, mapX, top, quickW, availableH, COLORS.panel)
-  drawVerticalLabel(centerWin, mapX, top, quickW, availableH, "MAP", COLORS.panelText, COLORS.panel)
-  quickMapBox = {
-    x1 = layout.centerX + mapX - 1,
-    y1 = top,
-    x2 = layout.centerX + mapX + quickW - 2,
-    y2 = layout.h
-  }
+  if quickW > 0 then
+    fillRect(centerWin, mapX, top, quickW, availableH, COLORS.panel)
+    drawVerticalLabel(centerWin, mapX, top, quickW, availableH, "MAP", COLORS.panelText, COLORS.panel)
+    quickMapBox = {
+      x1 = layout.centerX + mapX - 1,
+      y1 = top,
+      x2 = layout.centerX + mapX + quickW - 2,
+      y2 = layout.h
+    }
 
-  fillRect(centerWin, settingsX, top, quickW, availableH, COLORS.panel)
-  drawVerticalLabel(centerWin, settingsX, top, quickW, availableH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
-  quickSettingsBox = {
-    x1 = layout.centerX + settingsX - 1,
-    y1 = top,
-    x2 = layout.centerX + settingsX + quickW - 2,
-    y2 = layout.h
-  }
+    fillRect(centerWin, settingsX, top, quickW, availableH, COLORS.panel)
+    drawVerticalLabel(centerWin, settingsX, top, quickW, availableH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
+    quickSettingsBox = {
+      x1 = layout.centerX + settingsX - 1,
+      y1 = top,
+      x2 = layout.centerX + settingsX + quickW - 2,
+      y2 = layout.h
+    }
+  end
 
   local modes = {
     { id = "standard", label = "ST", active = car.state.mode == "standard" },
@@ -2056,12 +2083,12 @@ function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX,
 end
 
 function car.drawHomeControls(top, availableH, controlsX, controlsW)
-  if controlsW < 8 then return end
+  if controlsW < 6 then return end
   local columns = 2
   local rows = 4
-  local buttonGap = 1
+  local buttonGap = availableH < 11 and 0 or 1
   local buttonW = math.floor((controlsW - buttonGap) / columns)
-  local buttonH = math.max(2, math.floor((availableH - buttonGap * (rows - 1)) / rows))
+  local buttonH = math.max(1, math.floor((availableH - buttonGap * (rows - 1)) / rows))
   local controls = {
     { id = "work_engine", title = "WORKSHOP", status = car.state.workshopEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.workshopEngineOff },
     { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.driveEngineOff },
@@ -2089,7 +2116,7 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
         foreground = COLORS.activeText
         background = COLORS.activeBg
       end
-      local line1 = trim(control.title, math.max(1, width - 2))
+      local line1 = trim(height == 1 and control.status or control.title, math.max(1, width - 2))
       local line2 = trim(control.status, math.max(1, width - 2))
       local lineY = y + math.max(0, math.floor((height - 2) / 2))
       writeAt(centerWin, x + math.max(0, math.floor((width - #line1) / 2)), lineY, line1, foreground, background)
@@ -2125,11 +2152,11 @@ local function drawHome(y0)
   local top = math.max(2, y0)
   local availableH = math.max(1, layout.h - top + 1)
   local gap = 1
-  local quickW = layout.centerW >= 32 and 3 or 2
+  local quickW = layout.compact and 0 or (layout.centerW >= 32 and 3 or 2)
   local modeW = layout.centerW >= 32 and 4 or 3
   local mapX = 1
   local settingsX = mapX + quickW + gap
-  local modeX = settingsX + quickW + gap
+  local modeX = quickW > 0 and (settingsX + quickW + gap) or 1
   local controlsX = modeX + modeW + gap
   local controlsW = layout.centerW - controlsX + 1
 
@@ -2920,6 +2947,7 @@ function car.safeShutdown()
 end
 
 local function drawCrash(err)
+  if car.writeHDError then pcall(car.writeHDError, err) end
   if car.drawHDError then pcall(car.drawHDError, err) end
   term.redirect(ui)
   local w, h = term.getSize()
@@ -2944,9 +2972,17 @@ local function drawCrash(err)
 
   if car.flushHD then car.flushHD() end
 
-  while true do
-    local ev = os.pullEvent()
-    if ev == "key" or ev == "mouse_click" or ev == "monitor_touch" then break end
+  if nativeTerm and nativeTerm ~= ui then
+    term.redirect(nativeTerm)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.white)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("RoadRover OS stopped")
+    term.setTextColor(colors.red)
+    print(tostring(err or "Unknown error"))
+    term.setTextColor(colors.lightGray)
+    print("Log: roadrover-hd-error.log")
   end
 end
 
@@ -2954,6 +2990,7 @@ local function main()
   car.scanDevices(true)
   if car.setupHD then car.setupHD(true) end
   rebuildUI()
+  redraw()
   ensureProfile()
   rebuildUI()
   redraw()

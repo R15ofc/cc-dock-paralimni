@@ -94,8 +94,16 @@ return function(car, context)
   local function drawTextPixels(x, y, text, rgb, maxWidth)
     local gpu = car.devices.gpu
     if not gpu or type(gpu.drawText) ~= "function" then return false end
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    if x < 1 or y < 1 or x > (tonumber(car.hd.width) or 0) or y + terminalState.cellHeight - 1 > (tonumber(car.hd.height) or 0) then
+      return false
+    end
     text = tostring(text or "")
-    maxWidth = math.max(0, math.floor(tonumber(maxWidth) or 0))
+    maxWidth = math.min(
+      math.max(0, math.floor(tonumber(maxWidth) or 0)),
+      math.max(0, (tonumber(car.hd.width) or 0) - x + 1)
+    )
     while #text > 0 and textLength(text) > maxWidth do text = text:sub(1, -2) end
     if text == "" or maxWidth <= 0 then return true end
     local ok, err = pcall(gpu.drawText, x, y, text, signedARGB(rgb), -1, 1, 1)
@@ -373,10 +381,10 @@ return function(car, context)
     car.hd.height = math.floor(detectedHeight)
     terminalState.cellWidth = 6
     terminalState.cellHeight = 8
-    terminalState.width = math.max(40, math.floor(car.hd.width / terminalState.cellWidth))
-    terminalState.height = math.max(14, math.floor(car.hd.height / terminalState.cellHeight))
-    terminalState.offsetX = 1
-    terminalState.offsetY = 1
+    terminalState.width = math.max(1, math.floor(car.hd.width / terminalState.cellWidth))
+    terminalState.height = math.max(1, math.floor(car.hd.height / terminalState.cellHeight))
+    terminalState.offsetX = math.floor((car.hd.width - terminalState.width * terminalState.cellWidth) / 2) + 1
+    terminalState.offsetY = math.floor((car.hd.height - terminalState.height * terminalState.cellHeight) / 2) + 1
     terminalState.cursorX = 1
     terminalState.cursorY = 1
     car.hd.gpuName = car.devices.gpuName
