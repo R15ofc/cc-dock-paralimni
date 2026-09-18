@@ -1,9 +1,333 @@
 return function(car, context)
-  function car.hdColor(color)
-    color = math.floor(tonumber(color) or 0)
-    if color >= 0 and color <= 16777215 then color = 4278190080 + color end
-    if color > 2147483647 then color = color - 4294967296 end
-    return color
+  local COLOR_RGB = {
+    [1] = 0xF0F0F0,
+    [2] = 0xF2B233,
+    [4] = 0xE57FD8,
+    [8] = 0x99B2F2,
+    [16] = 0xDED83D,
+    [32] = 0x7FCC19,
+    [64] = 0xF2B2CC,
+    [128] = 0x4C4C4C,
+    [256] = 0x999999,
+    [512] = 0x4C99B2,
+    [1024] = 0xB266E5,
+    [2048] = 0x3366CC,
+    [4096] = 0x7F664C,
+    [8192] = 0x57A64E,
+    [16384] = 0xCC4C4C,
+    [32768] = 0x111111
+  }
+  local HEX = "0123456789abcdef"
+  local COLOR_HEX = {}
+  for index = 1, #HEX do COLOR_HEX[2 ^ (index - 1)] = HEX:sub(index, index) end
+  local terminalState = {
+    cursorX = 1,
+    cursorY = 1,
+    cursorBlink = false,
+    textColor = colors.white,
+    backgroundColor = colors.black,
+    palette = {},
+    width = 63,
+    height = 24,
+    cellWidth = 6,
+    cellHeight = 8,
+    offsetX = 1,
+    offsetY = 1,
+    lines = {},
+    dirty = true
+  }
+  local gpuTerminal
+
+  for color, rgb in pairs(COLOR_RGB) do terminalState.palette[color] = rgb end
+
+  local function signedARGB(rgb)
+    rgb = math.floor(tonumber(rgb) or 0) % 0x1000000
+    local value = 0xFF000000 + rgb
+    if value > 0x7FFFFFFF then value = value - 0x100000000 end
+    return value
+  end
+
+  local function colorRGB(color)
+    return terminalState.palette[color] or COLOR_RGB[color] or 0x000000
+  end
+
+  local function decodeBlitColor(value, fallback)
+    local index = HEX:find(tostring(value or ""):lower(), 1, true)
+    if not index then return fallback end
+    return 2 ^ (index - 1)
+  end
+
+  local function clip(value, minimum, maximum)
+    value = math.floor(tonumber(value) or minimum)
+    if value < minimum then return minimum end
+    if value > maximum then return maximum end
+    return value
+  end
+
+  local function fillPixels(x, y, width, height, rgb)
+    local gpu = car.devices.gpu
+    if not gpu or type(gpu.filledRectangle) ~= "function" then return false end
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    width = math.floor(tonumber(width) or 0)
+    height = math.floor(tonumber(height) or 0)
+    if x < 1 then width = width - (1 - x); x = 1 end
+    if y < 1 then height = height - (1 - y); y = 1 end
+    width = math.min(width, (tonumber(car.hd.width) or 0) - x + 1)
+    height = math.min(height, (tonumber(car.hd.height) or 0) - y + 1)
+    if width <= 0 or height <= 0 then return false end
+    local ok, err = pcall(gpu.filledRectangle, x, y, width, height, signedARGB(rgb))
+    if not ok then car.hd.error = tostring(err) end
+    return ok
+  end
+
+  local function textLength(text)
+    local gpu = car.devices.gpu
+    text = tostring(text or "")
+    if gpu and type(gpu.getTextLength) == "function" then
+      local ok, width = pcall(gpu.getTextLength, text, 1, 1)
+      if ok and tonumber(width) then return math.max(0, math.floor(width)) end
+    end
+    return #text * terminalState.cellWidth
+  end
+
+  local function drawTextPixels(x, y, text, rgb, maxWidth)
+    local gpu = car.devices.gpu
+    if not gpu or type(gpu.drawText) ~= "function" then return false end
+    text = tostring(text or "")
+    maxWidth = math.max(0, math.floor(tonumber(maxWidth) or 0))
+    while #text > 0 and textLength(text) > maxWidth do text = text:sub(1, -2) end
+    if text == "" or maxWidth <= 0 then return true end
+    local ok, err = pcall(gpu.drawText, x, y, text, signedARGB(rgb), -1, 1, 1)
+    if not ok then car.hd.error = tostring(err) end
+    return ok
+  end
+
+  local function cellPixelX(x)
+    return terminalState.offsetX + (x - 1) * terminalState.cellWidth
+  end
+
+  local function cellPixelY(y)
+    return terminalState.offsetY + (y - 1) * terminalState.cellHeight
+  end
+
+  local function clearWith(color)
+    fillPixels(1, 1, car.hd.width, car.hd.height, colorRGB(color))
+  end
+
+  local function blankLine()
+    return {
+      (" "):rep(terminalState.width),
+      (COLOR_HEX[terminalState.textColor] or "0"):rep(terminalState.width),
+      (COLOR_HEX[terminalState.backgroundColor] or "f"):rep(terminalState.width)
+    }
+  end
+
+  local function resetBuffer()
+    terminalState.lines = {}
+    for y = 1, terminalState.height do terminalState.lines[y] = blankLine() end
+    terminalState.dirty = true
+  end
+
+  local function writeBuffer(x, y, text, foreground, background)
+    text = tostring(text or "")
+    foreground = tostring(foreground or "")
+    background = tostring(background or "")
+    if text == "" or y < 1 or y > terminalState.height then return end
+    local sourceStart = 1
+    if x < 1 then
+      sourceStart = 2 - x
+      x = 1
+    end
+    if x > terminalState.width or sourceStart > #text then return end
+    local count = math.min(#text - sourceStart + 1, terminalState.width - x + 1)
+    if count <= 0 then return end
+    local sourceEnd = sourceStart + count - 1
+    local targetEnd = x + count - 1
+    local line = terminalState.lines[y] or blankLine()
+    local prefix = x > 1 and line[1]:sub(1, x - 1) or ""
+    local suffix = targetEnd < terminalState.width and line[1]:sub(targetEnd + 1) or ""
+    line[1] = prefix .. text:sub(sourceStart, sourceEnd) .. suffix
+    prefix = x > 1 and line[2]:sub(1, x - 1) or ""
+    suffix = targetEnd < terminalState.width and line[2]:sub(targetEnd + 1) or ""
+    line[2] = prefix .. foreground:sub(sourceStart, sourceEnd) .. suffix
+    prefix = x > 1 and line[3]:sub(1, x - 1) or ""
+    suffix = targetEnd < terminalState.width and line[3]:sub(targetEnd + 1) or ""
+    line[3] = prefix .. background:sub(sourceStart, sourceEnd) .. suffix
+    terminalState.lines[y] = line
+    terminalState.dirty = true
+  end
+
+  local function renderBuffer()
+    if not terminalState.dirty then return true end
+    for y = 1, terminalState.height do
+      local line = terminalState.lines[y] or blankLine()
+      local pixelY = cellPixelY(y)
+      local start = 1
+      while start <= terminalState.width do
+        local bg = line[3]:sub(start, start)
+        local finish = start
+        while finish < terminalState.width and line[3]:sub(finish + 1, finish + 1) == bg do
+          finish = finish + 1
+        end
+        local pixelX = cellPixelX(start)
+        local pixelWidth = (finish - start + 1) * terminalState.cellWidth
+        if finish == terminalState.width then pixelWidth = car.hd.width - pixelX + 1 end
+        fillPixels(pixelX, pixelY, pixelWidth, terminalState.cellHeight, colorRGB(decodeBlitColor(bg, colors.black)))
+        start = finish + 1
+      end
+
+      start = 1
+      while start <= terminalState.width do
+        if line[1]:sub(start, start) == " " then
+          start = start + 1
+        else
+          local fg = line[2]:sub(start, start)
+          local finish = start
+          while finish < terminalState.width
+            and line[1]:sub(finish + 1, finish + 1) ~= " "
+            and line[2]:sub(finish + 1, finish + 1) == fg do
+            finish = finish + 1
+          end
+          local text = line[1]:sub(start, finish)
+          local pixelX = cellPixelX(start)
+          local pixelWidth = (finish - start + 1) * terminalState.cellWidth
+          if finish == terminalState.width then pixelWidth = car.hd.width - pixelX + 1 end
+          drawTextPixels(pixelX, pixelY, text, colorRGB(decodeBlitColor(fg, colors.white)), pixelWidth)
+          start = finish + 1
+        end
+      end
+    end
+    terminalState.dirty = false
+    return car.hd.error == nil
+  end
+
+  local function makeTerminal()
+    local object = {}
+
+    function object.write(text)
+      text = tostring(text or "")
+      writeBuffer(
+        terminalState.cursorX,
+        terminalState.cursorY,
+        text,
+        (COLOR_HEX[terminalState.textColor] or "0"):rep(#text),
+        (COLOR_HEX[terminalState.backgroundColor] or "f"):rep(#text)
+      )
+      terminalState.cursorX = terminalState.cursorX + #text
+    end
+
+    function object.blit(text, foreground, background)
+      text = tostring(text or "")
+      foreground = tostring(foreground or "")
+      background = tostring(background or "")
+      if #foreground < #text then foreground = foreground .. (COLOR_HEX[terminalState.textColor] or "0"):rep(#text - #foreground) end
+      if #background < #text then background = background .. (COLOR_HEX[terminalState.backgroundColor] or "f"):rep(#text - #background) end
+      writeBuffer(terminalState.cursorX, terminalState.cursorY, text, foreground, background)
+      terminalState.cursorX = terminalState.cursorX + #text
+    end
+
+    function object.clear()
+      resetBuffer()
+    end
+
+    function object.clearLine()
+      if terminalState.cursorY >= 1 and terminalState.cursorY <= terminalState.height then
+        terminalState.lines[terminalState.cursorY] = blankLine()
+        terminalState.dirty = true
+      end
+    end
+
+    function object.getCursorPos()
+      return terminalState.cursorX, terminalState.cursorY
+    end
+
+    function object.setCursorPos(x, y)
+      terminalState.cursorX = math.floor(tonumber(x) or 1)
+      terminalState.cursorY = math.floor(tonumber(y) or 1)
+    end
+
+    function object.getCursorBlink()
+      return terminalState.cursorBlink
+    end
+
+    function object.setCursorBlink(value)
+      terminalState.cursorBlink = value and true or false
+    end
+
+    function object.isColor()
+      return true
+    end
+
+    object.isColour = object.isColor
+
+    function object.getSize()
+      return terminalState.width, terminalState.height
+    end
+
+    function object.scroll(offset)
+      offset = math.floor(tonumber(offset) or 0)
+      if offset > 0 then
+        for y = 1, terminalState.height do
+          terminalState.lines[y] = terminalState.lines[y + offset] or blankLine()
+        end
+      elseif offset < 0 then
+        for y = terminalState.height, 1, -1 do
+          terminalState.lines[y] = terminalState.lines[y + offset] or blankLine()
+        end
+      end
+      terminalState.dirty = true
+    end
+
+    function object.setTextColor(color)
+      terminalState.textColor = tonumber(color) or colors.white
+    end
+
+    object.setTextColour = object.setTextColor
+
+    function object.getTextColor()
+      return terminalState.textColor
+    end
+
+    object.getTextColour = object.getTextColor
+
+    function object.setBackgroundColor(color)
+      terminalState.backgroundColor = tonumber(color) or colors.black
+    end
+
+    object.setBackgroundColour = object.setBackgroundColor
+
+    function object.getBackgroundColor()
+      return terminalState.backgroundColor
+    end
+
+    object.getBackgroundColour = object.getBackgroundColor
+
+    function object.setPaletteColor(color, first, second, third)
+      color = tonumber(color)
+      if not color then return end
+      if second ~= nil and third ~= nil then
+        local red = clip((tonumber(first) or 0) * 255, 0, 255)
+        local green = clip((tonumber(second) or 0) * 255, 0, 255)
+        local blue = clip((tonumber(third) or 0) * 255, 0, 255)
+        terminalState.palette[color] = red * 0x10000 + green * 0x100 + blue
+      else
+        terminalState.palette[color] = math.floor(tonumber(first) or 0) % 0x1000000
+      end
+    end
+
+    object.setPaletteColour = object.setPaletteColor
+
+    function object.getPaletteColor(color)
+      local rgb = colorRGB(tonumber(color))
+      return math.floor(rgb / 0x10000) % 0x100 / 255,
+        math.floor(rgb / 0x100) % 0x100 / 255,
+        rgb % 0x100 / 255
+    end
+
+    object.getPaletteColour = object.getPaletteColor
+
+    return object
   end
 
   function car.setupHD(force)
@@ -17,23 +341,25 @@ return function(car, context)
     if not force and car.hd.ready and car.hd.gpuName == car.devices.gpuName then return true end
     local detectedWidth, detectedHeight
     local ok, setupError = pcall(function()
-      for attempt = 1, 5 do
-        if gpu.refreshSize then gpu.refreshSize() end
-        if sleep then sleep(0.2) end
-        if gpu.getSize then
+      for _ = 1, 8 do
+        if type(gpu.refreshSize) == "function" then gpu.refreshSize() end
+        if sleep then sleep(0.15) end
+        if type(gpu.getSize) == "function" then
           local width, height = gpu.getSize()
-          if tonumber(width) and tonumber(height) and width > 0 and height > 0 then
+          width, height = tonumber(width), tonumber(height)
+          if width and height and width > 0 and height > 0 then
             detectedWidth, detectedHeight = width, height
             break
           end
         end
       end
-      if not detectedWidth then error("GPU monitor size is 0x0; check monitor connection", 0) end
-      if gpu.setSize then gpu.setSize(64) end
-      if sleep then sleep(0.15) end
-      if gpu.getSize then
+      if not detectedWidth then error("GPU monitor size is 0x0; check GPU cable and monitor", 0) end
+      if type(gpu.setSize) == "function" then gpu.setSize(64) end
+      if sleep then sleep(0.2) end
+      if type(gpu.getSize) == "function" then
         local width, height = gpu.getSize()
-        if tonumber(width) and tonumber(height) and width > 0 and height > 0 then
+        width, height = tonumber(width), tonumber(height)
+        if width and height and width > 0 and height > 0 then
           detectedWidth, detectedHeight = width, height
         end
       end
@@ -45,263 +371,67 @@ return function(car, context)
     end
     car.hd.width = math.floor(detectedWidth)
     car.hd.height = math.floor(detectedHeight)
+    terminalState.cellWidth = 6
+    terminalState.cellHeight = 8
+    terminalState.width = math.max(40, math.floor(car.hd.width / terminalState.cellWidth))
+    terminalState.height = math.max(14, math.floor(car.hd.height / terminalState.cellHeight))
+    terminalState.offsetX = 1
+    terminalState.offsetY = 1
+    terminalState.cursorX = 1
+    terminalState.cursorY = 1
     car.hd.gpuName = car.devices.gpuName
-    car.hd.ready = type(gpu.filledRectangle) == "function" and type(gpu.drawText) == "function"
+    car.hd.ready = type(gpu.filledRectangle) == "function" and type(gpu.drawText) == "function" and type(gpu.sync) == "function"
     car.hd.error = car.hd.ready and nil or "GPU drawing methods missing"
+    if car.hd.ready and not gpuTerminal then gpuTerminal = makeTerminal() end
+    if car.hd.ready then resetBuffer() end
     return car.hd.ready
   end
-  
-  function car.hdFill(x, y, width, height, color)
-    local gpu = car.devices.gpu
-    if not gpu or not gpu.filledRectangle then return false end
-    x = math.max(1, math.floor(tonumber(x) or 1))
-    y = math.max(1, math.floor(tonumber(y) or 1))
-    width = math.min(math.floor(tonumber(width) or 0), car.hd.width - x + 1)
-    height = math.min(math.floor(tonumber(height) or 0), car.hd.height - y + 1)
-    if width <= 0 or height <= 0 then return false end
-    local ok, result = pcall(gpu.filledRectangle, x, y, width, height, car.hdColor(color))
-    if not ok then car.hd.error = tostring(result) end
+
+  function car.getHDTerminal()
+    if not car.setupHD(false) then return nil end
+    return gpuTerminal
+  end
+
+  function car.flushHD()
+    if not car.hd.ready or not car.devices.gpu then return false end
+    car.hd.error = nil
+    if not renderBuffer() then return false end
+    local ok, err = pcall(car.devices.gpu.sync)
+    if not ok then car.hd.error = tostring(err) end
     return ok
   end
-  
-  function car.hdRound(x, y, width, height, radius, color)
-    radius = math.max(0, math.min(math.floor(radius or 0), math.floor(math.min(width, height) / 2)))
-    if radius <= 1 then return car.hdFill(x, y, width, height, color) end
-    car.hdFill(x + radius, y, width - radius * 2, height, color)
-    car.hdFill(x, y + radius, width, height - radius * 2, color)
-    for offset = 0, radius - 1 do
-      local inset = math.floor((radius - offset) * 0.58)
-      car.hdFill(x + inset, y + offset, width - inset * 2, 1, color)
-      car.hdFill(x + inset, y + height - offset - 1, width - inset * 2, 1, color)
+
+  function car.hdToTermPoint(a, b, c, d)
+    local pixelX, pixelY
+    if type(a) == "number" and type(b) == "number" then
+      pixelX, pixelY = a, b
+    elseif type(b) == "number" and type(c) == "number" then
+      pixelX, pixelY = b, c
+    elseif type(c) == "number" and type(d) == "number" then
+      pixelX, pixelY = c, d
     end
+    if not pixelX or not pixelY then return nil, nil end
+    if pixelX < 1 then pixelX = pixelX + 1 end
+    if pixelY < 1 then pixelY = pixelY + 1 end
+    if pixelX > car.hd.width or pixelY > car.hd.height then return nil, nil end
+    local x = math.floor((pixelX - terminalState.offsetX) / terminalState.cellWidth) + 1
+    local y = math.floor((pixelY - terminalState.offsetY) / terminalState.cellHeight) + 1
+    x = math.min(x, terminalState.width)
+    y = math.min(y, terminalState.height)
+    if x < 1 or y < 1 then return nil, nil end
+    return x, y
   end
-  
-  function car.hdOutline(x, y, width, height, color)
-    car.hdFill(x + 4, y, width - 8, 1, color)
-    car.hdFill(x + 4, y + height - 1, width - 8, 1, color)
-    car.hdFill(x, y + 4, 1, height - 8, color)
-    car.hdFill(x + width - 1, y + 4, 1, height - 8, color)
-    car.hdFill(x + 1, y + 2, 2, 1, color)
-    car.hdFill(x + width - 3, y + 2, 2, 1, color)
-    car.hdFill(x + 1, y + height - 3, 2, 1, color)
-    car.hdFill(x + width - 3, y + height - 3, 2, 1, color)
-  end
-  
-  function car.hdText(x, y, text, color, scale, background)
-    local gpu = car.devices.gpu
-    if not gpu or not gpu.drawText then return false end
-    text = tostring(text or "")
-    scale = math.max(1, math.floor(tonumber(scale) or 1))
-    x = math.max(1, math.floor(tonumber(x) or 1))
-    y = math.max(1, math.floor(tonumber(y) or 1))
-    y = math.min(y, math.max(1, car.hd.height - 8 * scale + 1))
-    local available = car.hd.width - x + 1
-    while #text > 0 and car.hdTextWidth(text, scale) > available do text = text:sub(1, -2) end
-    if text == "" then return false end
-    local foreground = car.hdColor(color or car.palette.text)
-    local backdrop = background == nil and -1 or car.hdColor(background)
-    local ok, result = pcall(gpu.drawText, x, y, text, foreground, backdrop, scale, 0)
-    if not ok then ok, result = pcall(gpu.drawText, x, y, text, foreground, backdrop, scale) end
-    if not ok then ok, result = pcall(gpu.drawText, x, y, text, foreground, backdrop) end
-    if not ok then car.hd.error = tostring(result) end
-    return ok
-  end
-  
-  function car.hdTextWidth(text, scale)
-    text = tostring(text or "")
-    scale = math.max(1, math.floor(tonumber(scale) or 1))
-    local gpu = car.devices.gpu
-    if gpu and gpu.getTextLength then
-      local ok, width = pcall(gpu.getTextLength, text, scale, 0)
-      if ok and tonumber(width) then return math.max(0, math.floor(width)) end
-    end
-    return #text * 6 * scale
-  end
-  
-  function car.hdCenteredText(x, y, width, text, color, scale)
-    car.hdText(x + math.floor((width - car.hdTextWidth(text, scale)) / 2), y, text, color, scale)
-  end
-  
-  function car.hdHit(id, x, y, width, height)
-    car.hd.hits[#car.hd.hits + 1] = { id = id, x = x, y = y, w = width, h = height }
-  end
-  
-  function car.hdButton(id, x, y, width, height, label, sublabel, active, accent)
-    accent = accent or car.palette.blue
-    local background = active and accent or car.palette.surfaceRaised
-    car.hdRound(x, y, width, height, 5, background)
-    if not active then car.hdOutline(x, y, width, height, car.palette.border) end
-    local labelY = sublabel and (y + math.max(4, math.floor(height / 2) - 8)) or (y + math.floor((height - 9) / 2))
-    car.hdCenteredText(x, labelY, width, tostring(label or ""), active and car.palette.background or car.palette.text, 1)
-    if sublabel then
-      car.hdCenteredText(x, labelY + 10, width, tostring(sublabel), active and car.palette.background or car.palette.muted, 1)
-    end
-    if id then car.hdHit(id, x, y, width, height) end
-  end
-  
-  function car.hdModeButton(id, x, y, width, height, label, active)
-    local background = active and 0x000000 or car.palette.surfaceRaised
-    car.hdRound(x, y, width, height, 5, background)
-    car.hdOutline(x, y, width, height, active and car.palette.text or car.palette.border)
-    car.hdCenteredText(x, y + math.floor((height - 9) / 2), width, label, car.palette.text, 1)
-    car.hdHit(id, x, y, width, height)
-  end
-  
-  function car.hdSpeed()
-    local kmh = context.getSpeed() * 3.6
-    if context.settings.units == "MP/H" then return kmh * 0.621371, "MPH" end
-    if context.settings.units == "B/S" then return context.getSpeed(), "B/S" end
-    return kmh, "KM/H"
-  end
-  
-  function car.drawHDNav(navX, top, width, height)
-    local items = {
-      { "HOME", "home" },
-      { "STATS", "stats" },
-      { "SET", "settings" },
-      { "ABOUT", "about" }
-    }
-    local gap = 4
-    local itemH = math.floor((height - gap * (#items - 1)) / #items)
-    for i = 1, #items do
-      local y = top + (i - 1) * (itemH + gap)
-      local selected = context.tabs[context.getActiveTab()] and context.tabs[context.getActiveTab()].id == items[i][2]
-      car.hdButton("tabid:" .. items[i][2], navX, y, width, itemH, items[i][1], nil, selected, car.palette.blue)
-    end
-  end
-  
-  function car.drawHDHome(x, y, width, height)
-    local speedW = math.max(86, math.floor(width * 0.30))
-    local gap = 6
-    local modeW = 34
-    local modeX = x + speedW + gap
-    local actionX = modeX + modeW + gap
-    local actionW = width - speedW - modeW - gap * 2
-    car.hdRound(x, y, speedW, height, 7, car.palette.surface)
-    car.hdText(x + 10, y + 9, "SPEED", car.palette.muted, 1)
-    local speed, unit = car.hdSpeed()
-    local speedText = tostring(math.floor(speed + 0.5))
-    local speedScale = #speedText <= 2 and 4 or 3
-    car.hdCenteredText(x, y + 42, speedW, speedText, car.palette.text, speedScale)
-    car.hdCenteredText(x, y + 84, speedW, unit, car.palette.muted, 1)
-    local signalText = car.state.lighting == "left" and "LEFT" or (car.state.lighting == "right" and "RIGHT" or (car.state.lighting == "hazard" and "HAZARD" or ""))
-    if signalText ~= "" then car.hdCenteredText(x, y + 98, speedW, signalText, car.palette.yellow, 1) end
-    local gear = car.state.reverse and "R" or (car.state.clutch and "D" or "P")
-    car.hdCenteredText(x, y + height - 41, speedW, gear, car.state.reverse and car.palette.orange or car.palette.green, 3)
-  
-    local modeGap = 5
-    local modeH = math.floor((height - modeGap * 2) / 3)
-    car.hdModeButton("control:standard", modeX, y, modeW, modeH, "ST", car.state.mode == "standard")
-    car.hdModeButton("control:sport", modeX, y + modeH + modeGap, modeW, modeH, "S", car.state.mode == "sport")
-    car.hdModeButton("control:sport_plus", modeX, y + (modeH + modeGap) * 2, modeW, height - (modeH + modeGap) * 2, "S+", car.state.mode == "sport_plus")
-  
-    local controlsGap = 5
-    local controlW = math.floor((actionW - controlsGap * 2) / 3)
-    local controlH = math.floor((height - controlsGap * 2) / 3)
-    local thirdW = actionW - (controlW + controlsGap) * 2
-    car.hdButton("control:work_engine", actionX, y, controlW, controlH, "WORKSHOP", "STOP", car.state.workshopEngineOff, car.palette.red)
-    car.hdButton("control:drive_engine", actionX + controlW + controlsGap, y, controlW, controlH, "DRIVE", "STOP", car.state.driveEngineOff, car.palette.red)
-    car.hdButton("control:cruise", actionX + (controlW + controlsGap) * 2, y, thirdW, controlH, "CRUISE", car.cruiseOn and "ON" or "OFF", car.cruiseOn, car.palette.green)
-  
-    local secondY = y + controlH + controlsGap
-    car.hdButton("control:front_drive", actionX, secondY, controlW, controlH, "DRIVE", car.state.frontDriveOff and "2WD" or "AWD", not car.state.frontDriveOff, car.palette.blue)
-    car.hdButton("control:headlights", actionX + controlW + controlsGap, secondY, controlW, controlH, "LIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan)
-    car.hdButton("control:boost", actionX + (controlW + controlsGap) * 2, secondY, thirdW, controlH, "SHOP", "BOOST", car.state.workshopBoost, car.palette.orange)
-  
-    local thirdY = y + (controlH + controlsGap) * 2
-    car.hdButton("control:suspension_up", actionX, thirdY, controlW, height - (thirdY - y), "/\\", "HEIGHT", car.state.suspension == "up", car.palette.green)
-    car.hdButton("control:suspension_down", actionX + controlW + controlsGap, thirdY, controlW, height - (thirdY - y), "\\/", "HEIGHT", car.state.suspension == "down", car.palette.orange)
-    local steering = car.state.aHeld and not car.state.dHeld and "LEFT" or (car.state.dHeld and not car.state.aHeld and "RIGHT" or "CENTER")
-    car.hdButton(nil, actionX + (controlW + controlsGap) * 2, thirdY, thirdW, height - (thirdY - y), "STEER", steering, steering ~= "CENTER", car.palette.blue)
-  end
-  
-  function car.drawHDDrive(x, y, width, height)
-    local controls = {
-      { "standard", "STANDARD", "MODE", car.state.mode == "standard", car.palette.blue },
-      { "sport", "SPORT", "MODE", car.state.mode == "sport", car.palette.orange },
-      { "sport_plus", "SPORT+", "MODE", car.state.mode == "sport_plus", car.palette.red },
-      { "clutch", "CLUTCH", "W / S", car.state.clutch, car.palette.green },
-      { "reverse", "REVERSE", "S", car.state.reverse, car.palette.orange },
-      { "front_drive", "FRONT DRIVE", car.state.frontDriveOff and "OFF" or "ON", car.state.frontDriveOff, car.palette.red },
-      { "drive_engine", "DRIVE ENGINE", car.state.driveEngineOff and "OFF" or "ON", car.state.driveEngineOff, car.palette.red },
-      { "work_engine", "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, car.palette.red },
-      { "boost", "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, car.palette.orange },
-      { "headlights", "HEADLIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan },
-      { "left", "LEFT SIGNAL", "Z", car.state.lighting == "left", car.palette.yellow },
-      { "right", "RIGHT SIGNAL", "C", car.state.lighting == "right", car.palette.yellow },
-      { "hazard", "HAZARD", "X", car.state.lighting == "hazard", car.palette.red },
-      { "heading", "PORT HEADING", car.state.portHeading:upper(), false, car.palette.blue },
-      { nil, "PORT", car.devices.portName and "CONNECTED" or "MISSING", car.devices.portName ~= nil, car.palette.green }
-    }
-    local cols, rows, gap = 3, 5, 5
-    local buttonW = math.floor((width - gap * (cols - 1)) / cols)
-    local buttonH = math.floor((height - gap * (rows - 1)) / rows)
-    for i = 1, #controls do
-      local col = (i - 1) % cols
-      local row = math.floor((i - 1) / cols)
-      local control = controls[i]
-      car.hdButton(control[1] and ("control:" .. control[1]) or nil, x + col * (buttonW + gap), y + row * (buttonH + gap), col == cols - 1 and width - col * (buttonW + gap) or buttonW, buttonH, control[2], control[3], control[4], control[5])
-    end
-  end
-  
-  function car.drawHDStats(x, y, width, height)
-    local speed, unit = car.hdSpeed()
-    local cards = {
-      { "CURRENT SPEED", context.fmt(speed, 1) .. " " .. unit, car.palette.cyan },
-      { "MAX SPEED", context.fmt((context.stats.maxBps or 0) * 3.6, 1) .. " KM/H", car.palette.orange },
-      { "ODOMETER", context.fmt(context.stats.odometer or 0, 1) .. " BLOCKS", car.palette.green },
-      { "DRIVE TIME", context.fmtTime(context.stats.movingTime or 0), car.palette.blue }
-    }
-    local gap = 8
-    local cardW = math.floor((width - gap) / 2)
-    local cardH = math.floor((height - gap) / 2)
-    for i = 1, #cards do
-      local col = (i - 1) % 2
-      local row = math.floor((i - 1) / 2)
-      local cardX = x + col * (cardW + gap)
-      local cardY = y + row * (cardH + gap)
-      local actualW = col == 1 and width - cardW - gap or cardW
-      car.hdRound(cardX, cardY, actualW, cardH, 7, car.palette.surface)
-      car.hdText(cardX + 10, cardY + 10, cards[i][1], car.palette.muted, 1)
-      car.hdText(cardX + 10, cardY + 33, cards[i][2], cards[i][3], 2)
-    end
-  end
-  
-  function car.drawHDSettings(x, y, width, height)
-    local gap = 8
-    local rowH = math.floor((height - gap * 3) / 4)
-    car.hdButton("setting:units", x, y, width, rowH, "SPEED UNITS", context.settings.units, true, car.palette.blue)
-    car.hdButton("setting:smooth", x, y + rowH + gap, width, rowH, "SPEED FILTER", context.settings.smoothEnabled and "ON" or "OFF", context.settings.smoothEnabled, car.palette.green)
-    car.hdButton("control:heading", x, y + (rowH + gap) * 2, width, rowH, "PORT HEADING", car.state.portHeading:upper(), true, car.palette.orange)
-    local status = (car.devices.keyboardName and "KEYBOARD" or "NO KEYBOARD") .. "  |  " .. (car.devices.portName and "PORT 1" or "NO PORT 1") .. "  |  " .. (car.devices.secondaryPortName and "PORT 2" or "NO PORT 2")
-    car.hdButton(nil, x, y + (rowH + gap) * 3, width, height - (rowH + gap) * 3, "HARDWARE", status, car.devices.keyboardName ~= nil and car.devices.portName ~= nil and car.devices.secondaryPortName ~= nil, car.palette.green)
-  end
-  
-  function car.drawHDAbout(x, y, width, height)
-    car.hdRound(x, y, width, height, 7, car.palette.surface)
-    car.hdCenteredText(x, y + 24, width, "ROADROVER OS", car.palette.text, 3)
-    car.hdCenteredText(x, y + 58, width, "VERSION " .. context.version, car.palette.blue, 1)
-    car.hdCenteredText(x, y + 82, width, "HD VEHICLE CONTROL SYSTEM", car.palette.muted, 1)
-    car.hdCenteredText(x, y + 105, width, tostring(car.hd.width) .. " x " .. tostring(car.hd.height), car.palette.muted, 1)
-    car.hdCenteredText(x, y + height - 24, width, context.displayUserName(), car.palette.text, 1)
-  end
-  
+
   function car.drawHDError(message)
-    local gpu = car.devices.gpu
-    if not gpu then return false end
-    local width = tonumber(car.hd.width) or 384
-    local height = tonumber(car.hd.height) or 192
-    local text = tostring(message or car.hd.error or "HD renderer failed"):gsub("[\r\n]+", " ")
-    if #text > 58 then text = text:sub(1, 58) end
-    if gpu.fill then pcall(gpu.fill, car.hdColor(0x080B10)) end
-    if gpu.filledRectangle then
-      pcall(gpu.filledRectangle, 1, 1, width, height, car.hdColor(0x080B10))
-      pcall(gpu.filledRectangle, 12, math.max(12, math.floor(height / 2) - 30), math.max(1, width - 24), 60, car.hdColor(0x32141A))
-    end
-    car.hdText(24, math.max(20, math.floor(height / 2) - 17), "ROADROVER DISPLAY ERROR", 0xEF4B5A, 1)
-    car.hdText(24, math.max(34, math.floor(height / 2) + 3), text, 0xF4F7FA, 1)
-    car.hdText(24, math.max(48, math.floor(height / 2) + 18), "LOG: roadrover-hd-error.log", 0x8C9AA8, 1)
-    if gpu.sync then pcall(gpu.sync) end
+    if not car.devices.gpu or not car.hd.width or not car.hd.height then return false end
+    fillPixels(1, 1, car.hd.width, car.hd.height, 0xF0F0F0)
+    local text = tostring(message or car.hd.error or "Display error"):gsub("[\r\n]+", " ")
+    local title = "ROADROVER OS"
+    local titleWidth = textLength(title)
+    local bodyWidth = math.min(textLength(text), car.hd.width - 12)
+    drawTextPixels(math.max(1, math.floor((car.hd.width - titleWidth) / 2) + 1), math.max(1, math.floor(car.hd.height / 2) - 12), title, 0x111111, titleWidth)
+    drawTextPixels(math.max(1, math.floor((car.hd.width - bodyWidth) / 2) + 1), math.max(1, math.floor(car.hd.height / 2) + 4), text, 0xCC4C4C, bodyWidth)
+    if car.devices.gpu.sync then pcall(car.devices.gpu.sync) end
     return true
   end
 
@@ -317,103 +447,5 @@ return function(car, context)
     return true
   end
 
-  function car.drawHDFrame()
-    local gpu = car.devices.gpu
-    local width, height = car.hd.width, car.hd.height
-    car.hd.hits = {}
-    car.hd.error = nil
-    if gpu.fill then
-      local cleared, clearError = pcall(gpu.fill, car.hdColor(car.palette.background))
-      if not cleared then
-        car.hd.error = tostring(clearError)
-        if not car.hdFill(1, 1, width, height, car.palette.background) then error(car.hd.error or "GPU clear failed", 0) end
-      end
-    else
-      if not car.hdFill(1, 1, width, height, car.palette.background) then error(car.hd.error or "GPU clear failed", 0) end
-    end
-    car.hdFill(1, 1, width, 24, car.palette.surface)
-    car.hdText(9, 8, "ROADROVER", car.palette.text, 1)
-    local modeLabel = car.state.mode == "sport_plus" and "SPORT+" or car.state.mode:upper()
-    car.hdText(86, 8, modeLabel, car.state.mode == "standard" and car.palette.blue or car.palette.orange, 1)
-    local timeText = os.date("%H:%M")
-    if width >= 360 then car.hdText(145, 8, "A/D:STEER Z/C:SIG X:HAZ", car.palette.muted, 1) end
-    car.hdText(width - car.hdTextWidth(timeText, 1) - 9, 8, timeText, car.palette.text, 1)
-  
-    local margin = 8
-    local navW = math.max(58, math.floor(width * 0.17))
-    local navX = width - navW - margin + 1
-    local contentY = 32
-    local contentH = height - contentY - margin + 1
-    local contentW = navX - margin - 7
-    car.drawHDNav(navX, contentY, navW, contentH)
-    local tabId = context.tabs[context.getActiveTab()] and context.tabs[context.getActiveTab()].id or "home"
-    if tabId == "home" then
-      car.drawHDHome(margin, contentY, contentW, contentH)
-    elseif tabId == "drive" then
-      car.drawHDDrive(margin, contentY, contentW, contentH)
-    elseif tabId == "stats" then
-      car.drawHDStats(margin, contentY, contentW, contentH)
-    elseif tabId == "settings" then
-      car.drawHDSettings(margin, contentY, contentW, contentH)
-    else
-      car.drawHDAbout(margin, contentY, contentW, contentH)
-    end
-    if car.hd.error then error(car.hd.error, 0) end
-    if gpu.sync then
-      local synced, syncError = pcall(gpu.sync)
-      if not synced then error(tostring(syncError), 0) end
-    end
-    return true
-  end
-
-  function car.drawHD()
-    if not car.setupHD(false) then
-      car.writeHDError(car.hd.error)
-      if car.devices.gpu then car.drawHDError(car.hd.error) end
-      return false
-    end
-    local ok, result = xpcall(car.drawHDFrame, debug and debug.traceback or function(message) return message end)
-    if ok then return result == true end
-    car.hd.error = tostring(result)
-    car.writeHDError(car.hd.error)
-    car.drawHDError(car.hd.error)
-    return false
-  end
-  
-  function car.handleHDClick(x, y)
-    x, y = tonumber(x), tonumber(y)
-    if not x or not y then return false end
-    for i = #car.hd.hits, 1, -1 do
-      local target = car.hd.hits[i]
-      if x >= target.x and x <= target.x + target.w - 1 and y >= target.y and y <= target.y + target.h - 1 then
-        if target.id:sub(1, 6) == "tabid:" then
-          context.selectTab(target.id:sub(7))
-        elseif target.id:sub(1, 8) == "control:" then
-          car.handleDriveControl(target.id:sub(9))
-        elseif target.id == "setting:units" then
-          if context.settings.units == "KM/H" then context.settings.units = "MP/H"
-          elseif context.settings.units == "MP/H" then context.settings.units = "B/S"
-          else context.settings.units = "KM/H" end
-          context.saveSettings()
-        elseif target.id == "setting:smooth" then
-          context.settings.smoothEnabled = not context.settings.smoothEnabled
-          context.saveSettings()
-        end
-        return true
-      end
-    end
-    return false
-  end
-  
-  function car.hdEvent(event, a, b, c, d)
-    if event ~= "tm_monitor_mouse_click" and event ~= "tm_monitor_touch" then return false end
-    local x, y
-    if type(a) == "number" and type(b) == "number" then
-      x, y = a, b
-    else
-      x, y = b, c
-    end
-    return car.handleHDClick(x, y)
-  end
   return true
 end

@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.4"
+local VERSION = _G.ROADROVER_VERSION or "2.4.5"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -1086,8 +1086,11 @@ local function getPrimaryMonitor()
 end
 
 local function rebuildUI()
-  local mon = getPrimaryMonitor()
-  if mon then
+  local hdTerm = car.getHDTerminal and car.getHDTerminal() or nil
+  local mon = hdTerm and nil or getPrimaryMonitor()
+  if hdTerm then
+    ui = hdTerm
+  elseif mon then
     ui = mon
     if mon.setTextScale then pcall(function() mon.setTextScale(settings.textScale) end) end
   else
@@ -2011,11 +2014,112 @@ local function drawHome(y0)
     writeAt(centerWin, ux, 1, label, COLORS.fg, COLORS.bg)
   end
 
+  engineBox = nil
   cruiseBox = nil
-  local l = computeHomeLayout(y0)
-  quickBox = drawQuickActionsBlock(l.bigX, l.bigY, l.bigW, l.bigH)
-  drawHomeQuickColumns(l)
-  drawHomeCruiseAndEngine(l)
+  quickBox = nil
+  modeStandardBox = nil
+  modeSportBox = nil
+
+  local top = math.max(2, y0)
+  local availableH = math.max(1, layout.h - top + 1)
+  local gap = 1
+  local quickW = layout.centerW >= 32 and 3 or 2
+  local modeW = layout.centerW >= 32 and 4 or 3
+  local mapX = 1
+  local settingsX = mapX + quickW + gap
+  local modeX = settingsX + quickW + gap
+  local controlsX = modeX + modeW + gap
+  local controlsW = layout.centerW - controlsX + 1
+
+  fillRect(centerWin, mapX, top, quickW, availableH, COLORS.panel)
+  drawVerticalLabel(centerWin, mapX, top, quickW, availableH, "MAP", COLORS.panelText, COLORS.panel)
+  quickMapBox = {
+    x1 = layout.centerX + mapX - 1,
+    y1 = top,
+    x2 = layout.centerX + mapX + quickW - 2,
+    y2 = layout.h
+  }
+
+  fillRect(centerWin, settingsX, top, quickW, availableH, COLORS.panel)
+  drawVerticalLabel(centerWin, settingsX, top, quickW, availableH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
+  quickSettingsBox = {
+    x1 = layout.centerX + settingsX - 1,
+    y1 = top,
+    x2 = layout.centerX + settingsX + quickW - 2,
+    y2 = layout.h
+  }
+
+  local function driveBox(id, x, y, width, height)
+    car.driveBoxes[id] = {
+      x1 = layout.centerX + x - 1,
+      y1 = y,
+      x2 = layout.centerX + x + width - 2,
+      y2 = y + height - 1
+    }
+  end
+
+  local function modeButton(id, y, height, label, active)
+    fillRect(centerWin, modeX, y, modeW, height, COLORS.panel)
+    local bg = COLORS.panel
+    local fg = COLORS.panelText
+    if not active and modeW > 2 and height > 2 then
+      fillRect(centerWin, modeX + 1, y + 1, modeW - 2, height - 2, COLORS.bg)
+      bg = COLORS.bg
+      fg = COLORS.fg
+    end
+    local text = trim(label, math.max(1, modeW - (active and 0 or 2)))
+    local tx = modeX + math.floor((modeW - #text) / 2)
+    local ty = y + math.floor((height - 1) / 2)
+    writeAt(centerWin, tx, ty, text, fg, bg)
+    driveBox(id, modeX, y, modeW, height)
+  end
+
+  local modeGap = 1
+  local modeH = math.max(2, math.floor((availableH - modeGap * 2) / 3))
+  local lastModeH = availableH - modeH * 2 - modeGap * 2
+  modeButton("standard", top, modeH, "ST", car.state.mode == "standard")
+  modeButton("sport", top + modeH + modeGap, modeH, "S", car.state.mode == "sport")
+  modeButton("sport_plus", top + (modeH + modeGap) * 2, lastModeH, "S+", car.state.mode == "sport_plus")
+
+  if controlsW < 8 then return end
+  local columns = 2
+  local rows = 4
+  local buttonGap = 1
+  local buttonW = math.floor((controlsW - buttonGap) / columns)
+  local buttonH = math.max(2, math.floor((availableH - buttonGap * (rows - 1)) / rows))
+
+  local function controlButton(id, column, row, title, status, active)
+    local x = controlsX + (column - 1) * (buttonW + buttonGap)
+    local y = top + (row - 1) * (buttonH + buttonGap)
+    local width = column == columns and layout.centerW - x + 1 or buttonW
+    local height = row == rows and layout.h - y + 1 or buttonH
+    if width < 1 or height < 1 then return end
+    fillRect(centerWin, x, y, width, height, COLORS.panel)
+    local foreground = COLORS.panelText
+    local background = COLORS.panel
+    if active and width > 2 and height > 2 then
+      fillRect(centerWin, x + 1, y + 1, width - 2, height - 2, COLORS.activeBg)
+      foreground = COLORS.activeText
+      background = COLORS.activeBg
+    end
+    local line1 = trim(title, math.max(1, width - 2))
+    local line2 = trim(status, math.max(1, width - 2))
+    local lineY = y + math.max(0, math.floor((height - 2) / 2))
+    writeAt(centerWin, x + math.max(0, math.floor((width - #line1) / 2)), lineY, line1, foreground, background)
+    if height > 1 then
+      writeAt(centerWin, x + math.max(0, math.floor((width - #line2) / 2)), math.min(y + height - 1, lineY + 1), line2, foreground, background)
+    end
+    driveBox(id, x, y, width, height)
+  end
+
+  controlButton("work_engine", 1, 1, "WORKSHOP", car.state.workshopEngineOff and "ENGINE OFF" or "ENGINE ON", car.state.workshopEngineOff)
+  controlButton("drive_engine", 2, 1, "DRIVE", car.state.driveEngineOff and "ENGINE OFF" or "ENGINE ON", car.state.driveEngineOff)
+  controlButton("cruise", 1, 2, "CRUISE", car.cruiseOn and "ON" or "OFF", car.cruiseOn)
+  controlButton("front_drive", 2, 2, "TRACTION", car.state.frontDriveOff and "2WD" or "AWD", not car.state.frontDriveOff)
+  controlButton("boost", 1, 3, "WORKSHOP", car.state.workshopBoost and "BOOST ON" or "BOOST OFF", car.state.workshopBoost)
+  controlButton("headlights", 2, 3, "LIGHTS", car.state.lighting == "headlights" and "ON" or "OFF", car.state.lighting == "headlights")
+  controlButton("suspension_up", 1, 4, "/\\", "HEIGHT", car.state.suspension == "up")
+  controlButton("suspension_down", 2, 4, "\\/", "HEIGHT", car.state.suspension == "down")
 end
 
 local function drawStats(y0)
@@ -2453,10 +2557,10 @@ local function drawRight()
 end
 
 redraw = function()
-  if car.drawHD and car.drawHD() then return end
   drawLeft()
   drawCenter()
   drawRight()
+  if car.flushHD then car.flushHD() end
 end
 
 function car.loadHDRenderer()
@@ -2823,6 +2927,8 @@ local function drawCrash(err)
     term.write(e)
   end
 
+  if car.flushHD then car.flushHD() end
+
   while true do
     local ev = os.pullEvent()
     if ev == "key" or ev == "mouse_click" or ev == "monitor_touch" then break end
@@ -2855,7 +2961,9 @@ local function main()
       car.stopPulse()
 
     elseif ev == "tm_monitor_mouse_click" or ev == "tm_monitor_touch" then
-      if car.hdEvent and car.hdEvent(ev, a, b, c, d) then redraw() end
+      local mx, my
+      if car.hdToTermPoint then mx, my = car.hdToTermPoint(a, b, c, d) end
+      if mx and my and handleClick(mx, my) then redraw() end
 
     elseif ev == "monitor_touch" then
       local mx, my = b, c
