@@ -1,4 +1,11 @@
 return function(car, context)
+  function car.hdColor(color)
+    color = math.floor(tonumber(color) or 0)
+    if color >= 0 and color <= 16777215 then color = 4278190080 + color end
+    if color > 2147483647 then color = color - 4294967296 end
+    return color
+  end
+
   function car.setupHD(force)
     local gpu = car.devices.gpu
     if not gpu then
@@ -31,12 +38,12 @@ return function(car, context)
   function car.hdFill(x, y, width, height, color)
     local gpu = car.devices.gpu
     if not gpu or not gpu.filledRectangle then return false end
-    x = math.max(1, math.floor(tonumber(x) or 1))
-    y = math.max(1, math.floor(tonumber(y) or 1))
-    width = math.min(math.floor(tonumber(width) or 0), car.hd.width - x + 1)
-    height = math.min(math.floor(tonumber(height) or 0), car.hd.height - y + 1)
+    x = math.max(0, math.floor(tonumber(x) or 0))
+    y = math.max(0, math.floor(tonumber(y) or 0))
+    width = math.min(math.floor(tonumber(width) or 0), car.hd.width - x)
+    height = math.min(math.floor(tonumber(height) or 0), car.hd.height - y)
     if width <= 0 or height <= 0 then return false end
-    local ok, result = pcall(gpu.filledRectangle, x, y, width, height, color)
+    local ok, result = pcall(gpu.filledRectangle, x, y, width, height, car.hdColor(color))
     if not ok then car.hd.error = tostring(result) end
     return ok
   end
@@ -69,9 +76,11 @@ return function(car, context)
     if not gpu or not gpu.drawText then return false end
     text = tostring(text or "")
     scale = math.max(1, math.floor(tonumber(scale) or 1))
-    local ok, result = pcall(gpu.drawText, math.floor(x), math.floor(y), text, color or car.palette.text, background or -1, scale, 0)
-    if not ok then ok, result = pcall(gpu.drawText, math.floor(x), math.floor(y), text, color or car.palette.text, background or -1, scale) end
-    if not ok then ok, result = pcall(gpu.drawText, math.floor(x), math.floor(y), text, color or car.palette.text, background or -1) end
+    local foreground = car.hdColor(color or car.palette.text)
+    local backdrop = background == nil and -1 or car.hdColor(background)
+    local ok, result = pcall(gpu.drawText, math.floor(x), math.floor(y), text, foreground, backdrop, scale, 0)
+    if not ok then ok, result = pcall(gpu.drawText, math.floor(x), math.floor(y), text, foreground, backdrop, scale) end
+    if not ok then ok, result = pcall(gpu.drawText, math.floor(x), math.floor(y), text, foreground, backdrop) end
     if not ok then car.hd.error = tostring(result) end
     return ok
   end
@@ -255,14 +264,14 @@ return function(car, context)
     local height = tonumber(car.hd.height) or 192
     local text = tostring(message or car.hd.error or "HD renderer failed"):gsub("[\r\n]+", " ")
     if #text > 58 then text = text:sub(1, 58) end
-    if gpu.fill then pcall(gpu.fill, 0x080B10) end
+    if gpu.fill then pcall(gpu.fill, car.hdColor(0x080B10)) end
     if gpu.filledRectangle then
-      pcall(gpu.filledRectangle, 1, 1, width, height, 0x080B10)
-      pcall(gpu.filledRectangle, 12, math.max(12, math.floor(height / 2) - 30), math.max(1, width - 24), 60, 0x32141A)
+      pcall(gpu.filledRectangle, 0, 0, width, height, car.hdColor(0x080B10))
+      pcall(gpu.filledRectangle, 12, math.max(12, math.floor(height / 2) - 30), math.max(1, width - 24), 60, car.hdColor(0x32141A))
     end
     if gpu.drawText then
-      pcall(gpu.drawText, 24, math.max(20, math.floor(height / 2) - 17), "ROADROVER DISPLAY ERROR", 0xEF4B5A, -1, 1, 0)
-      pcall(gpu.drawText, 24, math.max(34, math.floor(height / 2) + 3), text, 0xF4F7FA, -1, 1, 0)
+      pcall(gpu.drawText, 24, math.max(20, math.floor(height / 2) - 17), "ROADROVER DISPLAY ERROR", car.hdColor(0xEF4B5A), -1, 1, 0)
+      pcall(gpu.drawText, 24, math.max(34, math.floor(height / 2) + 3), text, car.hdColor(0xF4F7FA), -1, 1, 0)
     end
     if gpu.sync then pcall(gpu.sync) end
     return true
@@ -274,15 +283,15 @@ return function(car, context)
     car.hd.hits = {}
     car.hd.error = nil
     if gpu.fill then
-      local cleared, clearError = pcall(gpu.fill, car.palette.background)
+      local cleared, clearError = pcall(gpu.fill, car.hdColor(car.palette.background))
       if not cleared then
         car.hd.error = tostring(clearError)
-        if not car.hdFill(1, 1, width, height, car.palette.background) then error(car.hd.error or "GPU clear failed", 0) end
+        if not car.hdFill(0, 0, width, height, car.palette.background) then error(car.hd.error or "GPU clear failed", 0) end
       end
     else
-      if not car.hdFill(1, 1, width, height, car.palette.background) then error(car.hd.error or "GPU clear failed", 0) end
+      if not car.hdFill(0, 0, width, height, car.palette.background) then error(car.hd.error or "GPU clear failed", 0) end
     end
-    car.hdFill(1, 1, width, 24, car.palette.surface)
+    car.hdFill(0, 0, width, 24, car.palette.surface)
     car.hdText(9, 8, "ROADROVER", car.palette.text, 1)
     local modeLabel = car.state.mode == "sport_plus" and "SPORT+" or car.state.mode:upper()
     car.hdText(86, 8, modeLabel, car.state.mode == "standard" and car.palette.blue or car.palette.orange, 1)
@@ -292,9 +301,9 @@ return function(car, context)
   
     local margin = 8
     local navW = math.max(58, math.floor(width * 0.17))
-    local navX = width - navW - margin + 1
+    local navX = width - navW - margin
     local contentY = 32
-    local contentH = height - contentY - margin + 1
+    local contentH = height - contentY - margin
     local contentW = navX - margin - 7
     car.drawHDNav(navX, contentY, navW, contentH)
     local tabId = context.tabs[context.getActiveTab()] and context.tabs[context.getActiveTab()].id or "home"
