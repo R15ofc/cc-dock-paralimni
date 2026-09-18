@@ -2,15 +2,16 @@ local SOURCE = "https://raw.githubusercontent.com/R15ofc/cc-dock-paralimni/main/
 local TARGET = "startup.lua"
 local TEMP = TARGET .. ".new"
 local BACKUP = TARGET .. ".bak"
+local VEHICLE_INFO = "VehicleInfo.json"
 
 local function fail(message)
-  print("CarOS install failed: " .. tostring(message))
+  print("RoadRover OS install failed: " .. tostring(message))
   return false
 end
 
 if not http then return fail("HTTP API disabled") end
 
-print("Installing CarOS...")
+print("Installing RoadRover OS...")
 local cache_key = os.epoch and os.epoch("utc") or math.floor((os.clock and os.clock() or 0) * 1000)
 local handle, err = http.get(SOURCE .. "?v=" .. tostring(cache_key))
 if not handle then return fail(err or "download failed") end
@@ -33,6 +34,14 @@ if not moved then
 end
 if fs.exists(BACKUP) then fs.delete(BACKUP) end
 
-print("CarOS installed as startup.lua")
+if not fs.exists(VEHICLE_INFO) then
+  local info = fs.open(VEHICLE_INFO, "w")
+  if info then
+    info.write('{"model":"RoadRover","generation":"1","engineType":"Diesel","sedan":false,"portHeading":"north"}')
+    info.close()
+  end
+end
+
+print("RoadRover OS installed as startup.lua")
 print("Starting...")
 shell.run(TARGET)
