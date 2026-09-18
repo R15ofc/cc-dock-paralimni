@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.5"
+local VERSION = _G.ROADROVER_VERSION or "2.4.6"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -2004,6 +2004,108 @@ local function drawVertical(...)
   return drawVerticalLabel(...)
 end
 
+function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX, modeW)
+  fillRect(centerWin, mapX, top, quickW, availableH, COLORS.panel)
+  drawVerticalLabel(centerWin, mapX, top, quickW, availableH, "MAP", COLORS.panelText, COLORS.panel)
+  quickMapBox = {
+    x1 = layout.centerX + mapX - 1,
+    y1 = top,
+    x2 = layout.centerX + mapX + quickW - 2,
+    y2 = layout.h
+  }
+
+  fillRect(centerWin, settingsX, top, quickW, availableH, COLORS.panel)
+  drawVerticalLabel(centerWin, settingsX, top, quickW, availableH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
+  quickSettingsBox = {
+    x1 = layout.centerX + settingsX - 1,
+    y1 = top,
+    x2 = layout.centerX + settingsX + quickW - 2,
+    y2 = layout.h
+  }
+
+  local modes = {
+    { id = "standard", label = "ST", active = car.state.mode == "standard" },
+    { id = "sport", label = "S", active = car.state.mode == "sport" },
+    { id = "sport_plus", label = "S+", active = car.state.mode == "sport_plus" }
+  }
+  local modeGap = 1
+  local modeH = math.max(2, math.floor((availableH - modeGap * 2) / 3))
+  for index = 1, #modes do
+    local mode = modes[index]
+    local y = top + (index - 1) * (modeH + modeGap)
+    local height = index == #modes and layout.h - y + 1 or modeH
+    fillRect(centerWin, modeX, y, modeW, height, COLORS.panel)
+    local bg = COLORS.panel
+    local fg = COLORS.panelText
+    if not mode.active and modeW > 2 and height > 2 then
+      fillRect(centerWin, modeX + 1, y + 1, modeW - 2, height - 2, COLORS.bg)
+      bg = COLORS.bg
+      fg = COLORS.fg
+    end
+    local text = trim(mode.label, math.max(1, modeW - (mode.active and 0 or 2)))
+    local tx = modeX + math.floor((modeW - #text) / 2)
+    local ty = y + math.floor((height - 1) / 2)
+    writeAt(centerWin, tx, ty, text, fg, bg)
+    car.driveBoxes[mode.id] = {
+      x1 = layout.centerX + modeX - 1,
+      y1 = y,
+      x2 = layout.centerX + modeX + modeW - 2,
+      y2 = y + height - 1
+    }
+  end
+end
+
+function car.drawHomeControls(top, availableH, controlsX, controlsW)
+  if controlsW < 8 then return end
+  local columns = 2
+  local rows = 4
+  local buttonGap = 1
+  local buttonW = math.floor((controlsW - buttonGap) / columns)
+  local buttonH = math.max(2, math.floor((availableH - buttonGap * (rows - 1)) / rows))
+  local controls = {
+    { id = "work_engine", title = "WORKSHOP", status = car.state.workshopEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.workshopEngineOff },
+    { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.driveEngineOff },
+    { id = "cruise", title = "CRUISE", status = car.cruiseOn and "ON" or "OFF", active = car.cruiseOn },
+    { id = "front_drive", title = "TRACTION", status = car.state.frontDriveOff and "2WD" or "AWD", active = not car.state.frontDriveOff },
+    { id = "boost", title = "WORKSHOP", status = car.state.workshopBoost and "BOOST ON" or "BOOST OFF", active = car.state.workshopBoost },
+    { id = "headlights", title = "LIGHTS", status = car.state.lighting == "headlights" and "ON" or "OFF", active = car.state.lighting == "headlights" },
+    { id = "suspension_up", title = "/\\", status = "HEIGHT", active = car.state.suspension == "up" },
+    { id = "suspension_down", title = "\\/", status = "HEIGHT", active = car.state.suspension == "down" }
+  }
+  for index = 1, #controls do
+    local control = controls[index]
+    local column = ((index - 1) % columns) + 1
+    local row = math.floor((index - 1) / columns) + 1
+    local x = controlsX + (column - 1) * (buttonW + buttonGap)
+    local y = top + (row - 1) * (buttonH + buttonGap)
+    local width = column == columns and layout.centerW - x + 1 or buttonW
+    local height = row == rows and layout.h - y + 1 or buttonH
+    if width >= 1 and height >= 1 then
+      fillRect(centerWin, x, y, width, height, COLORS.panel)
+      local foreground = COLORS.panelText
+      local background = COLORS.panel
+      if control.active and width > 2 and height > 2 then
+        fillRect(centerWin, x + 1, y + 1, width - 2, height - 2, COLORS.activeBg)
+        foreground = COLORS.activeText
+        background = COLORS.activeBg
+      end
+      local line1 = trim(control.title, math.max(1, width - 2))
+      local line2 = trim(control.status, math.max(1, width - 2))
+      local lineY = y + math.max(0, math.floor((height - 2) / 2))
+      writeAt(centerWin, x + math.max(0, math.floor((width - #line1) / 2)), lineY, line1, foreground, background)
+      if height > 1 then
+        writeAt(centerWin, x + math.max(0, math.floor((width - #line2) / 2)), math.min(y + height - 1, lineY + 1), line2, foreground, background)
+      end
+      car.driveBoxes[control.id] = {
+        x1 = layout.centerX + x - 1,
+        y1 = y,
+        x2 = layout.centerX + x + width - 2,
+        y2 = y + height - 1
+      }
+    end
+  end
+end
+
 local function drawHome(y0)
   local uname = displayUserName()
   if uname ~= "" then
@@ -2031,95 +2133,8 @@ local function drawHome(y0)
   local controlsX = modeX + modeW + gap
   local controlsW = layout.centerW - controlsX + 1
 
-  fillRect(centerWin, mapX, top, quickW, availableH, COLORS.panel)
-  drawVerticalLabel(centerWin, mapX, top, quickW, availableH, "MAP", COLORS.panelText, COLORS.panel)
-  quickMapBox = {
-    x1 = layout.centerX + mapX - 1,
-    y1 = top,
-    x2 = layout.centerX + mapX + quickW - 2,
-    y2 = layout.h
-  }
-
-  fillRect(centerWin, settingsX, top, quickW, availableH, COLORS.panel)
-  drawVerticalLabel(centerWin, settingsX, top, quickW, availableH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
-  quickSettingsBox = {
-    x1 = layout.centerX + settingsX - 1,
-    y1 = top,
-    x2 = layout.centerX + settingsX + quickW - 2,
-    y2 = layout.h
-  }
-
-  local function driveBox(id, x, y, width, height)
-    car.driveBoxes[id] = {
-      x1 = layout.centerX + x - 1,
-      y1 = y,
-      x2 = layout.centerX + x + width - 2,
-      y2 = y + height - 1
-    }
-  end
-
-  local function modeButton(id, y, height, label, active)
-    fillRect(centerWin, modeX, y, modeW, height, COLORS.panel)
-    local bg = COLORS.panel
-    local fg = COLORS.panelText
-    if not active and modeW > 2 and height > 2 then
-      fillRect(centerWin, modeX + 1, y + 1, modeW - 2, height - 2, COLORS.bg)
-      bg = COLORS.bg
-      fg = COLORS.fg
-    end
-    local text = trim(label, math.max(1, modeW - (active and 0 or 2)))
-    local tx = modeX + math.floor((modeW - #text) / 2)
-    local ty = y + math.floor((height - 1) / 2)
-    writeAt(centerWin, tx, ty, text, fg, bg)
-    driveBox(id, modeX, y, modeW, height)
-  end
-
-  local modeGap = 1
-  local modeH = math.max(2, math.floor((availableH - modeGap * 2) / 3))
-  local lastModeH = availableH - modeH * 2 - modeGap * 2
-  modeButton("standard", top, modeH, "ST", car.state.mode == "standard")
-  modeButton("sport", top + modeH + modeGap, modeH, "S", car.state.mode == "sport")
-  modeButton("sport_plus", top + (modeH + modeGap) * 2, lastModeH, "S+", car.state.mode == "sport_plus")
-
-  if controlsW < 8 then return end
-  local columns = 2
-  local rows = 4
-  local buttonGap = 1
-  local buttonW = math.floor((controlsW - buttonGap) / columns)
-  local buttonH = math.max(2, math.floor((availableH - buttonGap * (rows - 1)) / rows))
-
-  local function controlButton(id, column, row, title, status, active)
-    local x = controlsX + (column - 1) * (buttonW + buttonGap)
-    local y = top + (row - 1) * (buttonH + buttonGap)
-    local width = column == columns and layout.centerW - x + 1 or buttonW
-    local height = row == rows and layout.h - y + 1 or buttonH
-    if width < 1 or height < 1 then return end
-    fillRect(centerWin, x, y, width, height, COLORS.panel)
-    local foreground = COLORS.panelText
-    local background = COLORS.panel
-    if active and width > 2 and height > 2 then
-      fillRect(centerWin, x + 1, y + 1, width - 2, height - 2, COLORS.activeBg)
-      foreground = COLORS.activeText
-      background = COLORS.activeBg
-    end
-    local line1 = trim(title, math.max(1, width - 2))
-    local line2 = trim(status, math.max(1, width - 2))
-    local lineY = y + math.max(0, math.floor((height - 2) / 2))
-    writeAt(centerWin, x + math.max(0, math.floor((width - #line1) / 2)), lineY, line1, foreground, background)
-    if height > 1 then
-      writeAt(centerWin, x + math.max(0, math.floor((width - #line2) / 2)), math.min(y + height - 1, lineY + 1), line2, foreground, background)
-    end
-    driveBox(id, x, y, width, height)
-  end
-
-  controlButton("work_engine", 1, 1, "WORKSHOP", car.state.workshopEngineOff and "ENGINE OFF" or "ENGINE ON", car.state.workshopEngineOff)
-  controlButton("drive_engine", 2, 1, "DRIVE", car.state.driveEngineOff and "ENGINE OFF" or "ENGINE ON", car.state.driveEngineOff)
-  controlButton("cruise", 1, 2, "CRUISE", car.cruiseOn and "ON" or "OFF", car.cruiseOn)
-  controlButton("front_drive", 2, 2, "TRACTION", car.state.frontDriveOff and "2WD" or "AWD", not car.state.frontDriveOff)
-  controlButton("boost", 1, 3, "WORKSHOP", car.state.workshopBoost and "BOOST ON" or "BOOST OFF", car.state.workshopBoost)
-  controlButton("headlights", 2, 3, "LIGHTS", car.state.lighting == "headlights" and "ON" or "OFF", car.state.lighting == "headlights")
-  controlButton("suspension_up", 1, 4, "/\\", "HEIGHT", car.state.suspension == "up")
-  controlButton("suspension_down", 2, 4, "\\/", "HEIGHT", car.state.suspension == "down")
+  car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX, modeW)
+  car.drawHomeControls(top, availableH, controlsX, controlsW)
 end
 
 local function drawStats(y0)
