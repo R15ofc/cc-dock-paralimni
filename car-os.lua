@@ -18,8 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local TURN_BLINK_SEC = 0.42
-local VERSION = _G.ROADROVER_VERSION or "2.2.0"
+local VERSION = _G.ROADROVER_VERSION or "2.2.1"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -99,7 +98,27 @@ local isValidRRIDKey
 local userDirKey
 local redraw
 local resetSpeedState
-local vehicleState
+local car = {
+  state = nil,
+  devices = {
+    portName = nil,
+    port = nil,
+    keyboardName = nil,
+    keyboard = nil,
+    lastScan = -1e9,
+    error = nil
+  },
+  headingOrder = { "north", "east", "south", "west" },
+  headingValid = { north = true, east = true, south = true, west = true },
+  driveBoxes = {},
+  outputCache = { chassis = {}, port = {} },
+  blinkPeriod = 0.55,
+  lastBlink = os.clock(),
+  engineOn = false,
+  pulseTimer = nil,
+  cruiseOn = false,
+  driveMode = "normal"
+}
 local timerResetRequested = false
 
 local DEFAULT_TEXT_SCALE = tonumber(_G.ROADROVER_TEXT_SCALE) or TEXT_SCALE
@@ -314,7 +333,7 @@ local function loadUserSettings()
   NIGHT_MODE = settings.nightMode and true or false
   _G.ROADROVER_NIGHT_MODE = NIGHT_MODE and 1 or 0
   applyNightMode()
-  if vehicleState then vehicleState.portHeading = settings.portHeading end
+  if car.state then car.state.portHeading = settings.portHeading end
   return true
 end
 
@@ -606,7 +625,7 @@ local function rescan(force)
   if f then getPos = f; posFnName = name end
 end
 
-vehicleState = {
+car.state = {
   mode = "standard",
   clutch = false,
   reverse = false,
@@ -621,27 +640,16 @@ vehicleState = {
   portHeading = tostring(vehicleInfo.portHeading or settings.portHeading or "north"):lower()
 }
 
-local headingOrder = { "north", "east", "south", "west" }
-local headingValid = { north = true, east = true, south = true, west = true }
-if not headingValid[vehicleState.portHeading] then vehicleState.portHeading = "north" end
+if not car.headingValid[car.state.portHeading] then car.state.portHeading = "north" end
 
-local carDevices = {
-  portName = nil,
-  port = nil,
-  keyboardName = nil,
-  keyboard = nil,
-  lastScan = -1e9,
-  error = nil
-}
-
-local function carPeripheralType(name)
+function car.peripheralType(name)
   if not peripheral or not peripheral.getType then return "" end
   local ok, kind = pcall(peripheral.getType, name)
   if not ok then return "" end
   return tostring(kind or ""):lower()
 end
 
-local function carHasMethod(name, wanted)
+function car.hasMethod(name, wanted)
   if not peripheral or not peripheral.getMethods then return false end
   local ok, methods = pcall(peripheral.getMethods, name)
   if not ok or type(methods) ~= "table" then return false end
@@ -651,66 +659,78 @@ local function carHasMethod(name, wanted)
   return false
 end
 
-local function scanCarDevices(force)
+function car.scanDevices(force)
   local now = os.clock()
-  if not force and now - carDevices.lastScan < 2 then return end
-  carDevices.lastScan = now
-  carDevices.portName, carDevices.port = nil, nil
-  carDevices.keyboardName, carDevices.keyboard = nil, nil
+  if not force and now - car.devices.lastScan < 2 then return end
+  car.devices.lastScan = now
+  local previousPortName = car.devices.portName
+  car.devices.portName, car.devices.port = nil, nil
+  car.devices.keyboardName, car.devices.keyboard = nil, nil
   if not peripheral or not peripheral.getNames then return end
   local ok, names = pcall(peripheral.getNames)
   if not ok or type(names) ~= "table" then return end
   for i = 1, #names do
     local name = names[i]
-    local kind = carPeripheralType(name)
+    local kind = car.peripheralType(name)
     local device = peripheral.wrap(name)
     if device then
-      if not carDevices.port and (kind:find("tm_rsport", 1, true) or (carHasMethod(name, "getSides") and type(device.setAnalogOutput) == "function")) then
-        carDevices.portName, carDevices.port = name, device
+      if not car.devices.port and (kind:find("tm_rsport", 1, true) or (car.hasMethod(name, "getSides") and type(device.setAnalogOutput) == "function")) then
+        car.devices.portName, car.devices.port = name, device
       end
-      if not carDevices.keyboard and (kind:find("tm_keyboard", 1, true) or type(device.setFireNativeEvents) == "function") then
-        carDevices.keyboardName, carDevices.keyboard = name, device
+      if not car.devices.keyboard and (kind:find("tm_keyboard", 1, true) or type(device.setFireNativeEvents) == "function") then
+        car.devices.keyboardName, car.devices.keyboard = name, device
       end
     end
   end
-  if carDevices.keyboard and carDevices.keyboard.setFireNativeEvents then
-    pcall(carDevices.keyboard.setFireNativeEvents, true)
+  if car.devices.keyboard and car.devices.keyboard.setFireNativeEvents then
+    pcall(car.devices.keyboard.setFireNativeEvents, true)
+  end
+  if force or previousPortName ~= car.devices.portName then
+    car.outputCache.port = {}
   end
 end
 
-local function horizontalPortMap()
-  if vehicleState.portHeading == "east" then
+function car.horizontalPortMap()
+  if car.state.portHeading == "east" then
     return { front = "east", right = "south", back = "west", left = "north" }
-  elseif vehicleState.portHeading == "south" then
+  elseif car.state.portHeading == "south" then
     return { front = "south", right = "west", back = "north", left = "east" }
-  elseif vehicleState.portHeading == "west" then
+  elseif car.state.portHeading == "west" then
     return { front = "west", right = "north", back = "east", left = "south" }
   end
   return { front = "north", right = "east", back = "south", left = "west" }
 end
 
-local function getPortSide(side)
+function car.getPortSide(side)
   if side == "top" then return "up" end
   if side == "bottom" then return "down" end
-  return horizontalPortMap()[side]
+  return car.horizontalPortMap()[side]
 end
 
-local function chassisOutput(side, enabled)
+function car.chassisOutput(side, enabled)
   if not redstone then return false end
+  enabled = enabled and true or false
+  if car.outputCache.chassis[side] == enabled then return true end
   local ok, err
   if redstone.setAnalogOutput then
     ok, err = pcall(redstone.setAnalogOutput, side, enabled and 15 or 0)
   elseif redstone.setOutput then
     ok, err = pcall(redstone.setOutput, side, enabled and true or false)
   end
-  if not ok then carDevices.error = tostring(err or "computer output failed") end
+  if ok then
+    car.outputCache.chassis[side] = enabled
+  else
+    car.devices.error = tostring(err or "computer output failed")
+  end
   return ok == true
 end
 
-local function portOutput(side, enabled)
-  local port = carDevices.port
+function car.portOutput(side, enabled)
+  local port = car.devices.port
   if not port then return false end
-  local worldSide = getPortSide(side)
+  local worldSide = car.getPortSide(side)
+  enabled = enabled and true or false
+  if car.outputCache.port[worldSide] == enabled then return true end
   local ok, err
   if port.setAnalogOutput then
     ok, err = pcall(port.setAnalogOutput, worldSide, enabled and 15 or 0)
@@ -719,69 +739,80 @@ local function portOutput(side, enabled)
   elseif port.setOutput then
     ok, err = pcall(port.setOutput, worldSide, enabled and true or false)
   end
-  if not ok then carDevices.error = tostring(err or "port output failed") end
+  if ok then
+    car.outputCache.port[worldSide] = enabled
+  else
+    car.devices.error = tostring(err or "port output failed")
+  end
   return ok == true
 end
 
-local function applyVehicleOutputs()
-  carDevices.error = nil
-  chassisOutput("top", vehicleState.mode == "sport" or vehicleState.mode == "sport_plus")
-  chassisOutput("right", vehicleState.mode == "sport_plus")
-  chassisOutput("back", vehicleState.reverse)
-  chassisOutput("left", vehicleState.frontDriveOff)
-  chassisOutput("front", vehicleState.workshopEngineOff)
-  chassisOutput("bottom", vehicleState.driveEngineOff)
-  portOutput("top", vehicleState.clutch)
-  portOutput("left", vehicleState.workshopBoost)
-  portOutput("right", (vehicleState.lighting == "right" or vehicleState.lighting == "hazard") and vehicleState.blink)
-  portOutput("back", (vehicleState.lighting == "left" or vehicleState.lighting == "hazard") and vehicleState.blink)
-  portOutput("bottom", vehicleState.lighting == "headlights")
-end
-
-local function setVehicleLighting(mode)
-  if vehicleState.lighting == mode then mode = "none" end
-  vehicleState.lighting = mode
-  applyVehicleOutputs()
-end
-
-local function cycleVehicleIndicator()
-  if vehicleState.lighting == "right" then
-    vehicleState.lighting = "left"
-  elseif vehicleState.lighting == "left" then
-    vehicleState.lighting = "none"
-  else
-    vehicleState.lighting = "right"
+function car.clearPortOutputs()
+  local port = car.devices.port
+  if not port then return end
+  local sides = { "up", "down", "north", "east", "south", "west" }
+  for i = 1, #sides do
+    if port.setAnalogOutput then
+      pcall(port.setAnalogOutput, sides[i], 0)
+    elseif port.setAnalogueOutput then
+      pcall(port.setAnalogueOutput, sides[i], 0)
+    elseif port.setOutput then
+      pcall(port.setOutput, sides[i], false)
+    end
   end
-  applyVehicleOutputs()
+  car.outputCache.port = {}
 end
 
-local function cyclePortHeading()
+function car.applyOutputs()
+  car.devices.error = nil
+  car.chassisOutput("top", car.state.mode == "sport" or car.state.mode == "sport_plus")
+  car.chassisOutput("right", car.state.mode == "sport_plus")
+  car.chassisOutput("back", car.state.reverse)
+  car.chassisOutput("left", car.state.frontDriveOff)
+  car.chassisOutput("front", car.state.workshopEngineOff)
+  car.chassisOutput("bottom", car.state.driveEngineOff)
+  car.portOutput("top", car.state.clutch)
+  car.portOutput("left", car.state.workshopBoost)
+  car.portOutput("right", (car.state.lighting == "right" or car.state.lighting == "hazard") and car.state.blink)
+  car.portOutput("back", (car.state.lighting == "left" or car.state.lighting == "hazard") and car.state.blink)
+  car.portOutput("bottom", car.state.lighting == "headlights")
+end
+
+function car.setLighting(mode)
+  if car.state.lighting == mode then mode = "none" end
+  car.state.lighting = mode
+  car.state.blink = mode ~= "none" and mode ~= "headlights"
+  car.lastBlink = os.clock()
+  car.applyOutputs()
+end
+
+function car.toggleIndicator()
+  car.setLighting("right")
+end
+
+function car.cyclePortHeading()
   local current = 1
-  for i = 1, #headingOrder do
-    if headingOrder[i] == vehicleState.portHeading then current = i break end
+  for i = 1, #car.headingOrder do
+    if car.headingOrder[i] == car.state.portHeading then current = i break end
   end
-  vehicleState.portHeading = headingOrder[(current % #headingOrder) + 1]
-  settings.portHeading = vehicleState.portHeading
+  car.clearPortOutputs()
+  car.state.portHeading = car.headingOrder[(current % #car.headingOrder) + 1]
+  settings.portHeading = car.state.portHeading
   saveUserSettings()
-  applyVehicleOutputs()
+  car.applyOutputs()
 end
 
-local function engineOutput(side, val)
-  vehicleState.driveEngineOff = not (val and true or false)
-  applyVehicleOutputs()
+function car.engineOutput(side, val)
+  car.state.driveEngineOff = not (val and true or false)
+  car.applyOutputs()
 end
 
-local function driveOutput(side, val)
-  vehicleState.clutch = (val and true or false) or vehicleState.wHeld
-  applyVehicleOutputs()
+function car.driveOutput(side, val)
+  car.state.clutch = (val and true or false) or car.state.wHeld or car.state.sHeld
+  car.applyOutputs()
 end
 
-local engineOn = false
-local pulseTimer = nil
-local cruiseOn = false
-local driveMode = "normal"
-
-local function canToggleEngine()
+function car.canToggleEngine()
   local now = os.clock()
   if (now - lastEngineClick) < ENGINE_CLICK_COOLDOWN then return false end
   lastEngineClick = now
@@ -789,42 +820,42 @@ local function canToggleEngine()
   return true
 end
 
-local function startPulse()
-  engineOutput(ENGINE_SIDE, engineOn)
+function car.startPulse()
+  car.engineOutput(ENGINE_SIDE, car.engineOn)
 end
 
-local function stopPulse()
-  pulseTimer = nil
+function car.stopPulse()
+  car.pulseTimer = nil
 end
 
-local function setEngine(state)
+function car.setEngine(state)
   if not isDiesel then return end
   if type(ENGINE_SIDE) ~= "string" or ENGINE_SIDE == "" then return end
   state = state and true or false
-  if state == engineOn then return end
-  engineOn = state
-  startPulse()
-  if not engineOn and cruiseOn then
-    cruiseOn = false
-    driveOutput(DRIVE_SIDE, false)
+  if state == car.engineOn then return end
+  car.engineOn = state
+  car.startPulse()
+  if not car.engineOn and car.cruiseOn then
+    car.cruiseOn = false
+    car.driveOutput(DRIVE_SIDE, false)
   end
 end
 
-local function toggleEngine()
-  setEngine(not engineOn)
+function car.toggleEngine()
+  car.setEngine(not car.engineOn)
 end
 
-local function setDriveMode(mode)
+function car.setDriveMode(mode)
   if mode ~= "normal" and mode ~= "sport" and mode ~= "sport_plus" then return end
-  driveMode = mode
-  vehicleState.mode = mode == "normal" and "standard" or mode
-  applyVehicleOutputs()
+  car.driveMode = mode
+  car.state.mode = mode == "normal" and "standard" or mode
+  car.applyOutputs()
 end
 
-scanCarDevices(true)
-engineOutput(ENGINE_SIDE, not isDiesel)
-setDriveMode(driveMode)
-driveOutput(DRIVE_SIDE, false)
+car.scanDevices(true)
+car.engineOutput(ENGINE_SIDE, not isDiesel)
+car.setDriveMode(car.driveMode)
+car.driveOutput(DRIVE_SIDE, false)
 
 local speedBuf = {}
 local function smoothBps(v)
@@ -1595,7 +1626,6 @@ local modeStandardBox = nil
 local modeSportBox = nil
 local actionBoxes = {}
 local settingsBoxes = {}
-local driveBoxes = {}
 local actionViews = { "actions", "info" }
 local actionViewIndex = 1
 local settingsViewIndex = 1
@@ -1760,7 +1790,7 @@ end
 local function drawHomeCruiseAndEngine(l)
   fillRect(centerWin, l.cruiseX, l.cruiseY, l.btnW, l.btnH, COLORS.panel)
   local c1 = "CRUISE"
-  local c2 = cruiseOn and "ON" or "OFF"
+  local c2 = car.cruiseOn and "ON" or "OFF"
   writeAt(centerWin, l.cruiseX + math.floor((l.btnW - #c1) / 2), l.cruiseY, c1, COLORS.panelText, COLORS.panel)
   writeAt(centerWin, l.cruiseX + math.floor((l.btnW - #c2) / 2), l.cruiseY + 1, c2, COLORS.panelText, COLORS.panel)
   cruiseBox = {
@@ -1773,7 +1803,7 @@ local function drawHomeCruiseAndEngine(l)
   if isDiesel then
     fillRect(centerWin, l.engineX, l.btnY, l.btnW, l.btnH, COLORS.panel)
     local label1 = "ENGINE"
-    local label2 = engineOn and "STOP" or "START"
+    local label2 = car.engineOn and "STOP" or "START"
     writeAt(centerWin, l.engineX + math.floor((l.btnW - #label1) / 2), l.btnY, label1, COLORS.panelText, COLORS.panel)
     writeAt(centerWin, l.engineX + math.floor((l.btnW - #label2) / 2), l.btnY + 1, label2, COLORS.panelText, COLORS.panel)
 
@@ -1784,10 +1814,10 @@ local function drawHomeCruiseAndEngine(l)
       y2 = l.btnY + l.btnH - 1
     }
   else
-    local stdBg = (driveMode == "normal") and COLORS.panel or COLORS.activeBg
-    local stdFg = (driveMode == "normal") and COLORS.panelText or COLORS.activeText
-    local sportBg = (driveMode == "sport") and COLORS.panel or COLORS.activeBg
-    local sportFg = (driveMode == "sport") and COLORS.panelText or COLORS.activeText
+    local stdBg = (car.driveMode == "normal") and COLORS.panel or COLORS.activeBg
+    local stdFg = (car.driveMode == "normal") and COLORS.panelText or COLORS.activeText
+    local sportBg = (car.driveMode == "sport") and COLORS.panel or COLORS.activeBg
+    local sportFg = (car.driveMode == "sport") and COLORS.panelText or COLORS.activeText
     local stdLabel = trim("ECO", l.btnW)
     local sportLabel = trim("SPORT", l.btnW)
 
@@ -2041,11 +2071,11 @@ local function drawActions(y0, viewId)
 
     addBtn("reset", "Reset Odometer")
     if isDiesel then
-      addBtn("engine", engineOn and "Engine Stop" or "Engine Start")
+      addBtn("engine", car.engineOn and "Engine Stop" or "Engine Start")
     else
       addBtn("drive_mode", "Change Drive Mode")
     end
-    addBtn("cruise", cruiseOn and "Cruise Off" or "Cruise On")
+    addBtn("cruise", car.cruiseOn and "Cruise Off" or "Cruise On")
   elseif viewId == "info" then
     local listTop = y0 + 1
     local y = listTop
@@ -2132,12 +2162,12 @@ local function drawSettings(y0)
   end
 end
 
-local function drawDrive(y0)
+function car.drawDrive(y0)
   actionBoxes = {}
   settingsBoxes = {}
   engineBox = nil
   cruiseBox = nil
-  driveBoxes = {}
+  car.driveBoxes = {}
 
   local margin = 1
   local gapX = 1
@@ -2171,7 +2201,7 @@ local function drawDrive(y0)
       writeAt(centerWin, x + math.max(0, math.floor((width - #label1) / 2)), y, label1, fg, bg)
       writeAt(centerWin, x + math.max(0, math.floor((width - #label2) / 2)), y + 1, label2, fg, bg)
     end
-    driveBoxes[id] = {
+    car.driveBoxes[id] = {
       x1 = layout.centerX + x - 1,
       y1 = y,
       x2 = layout.centerX + x + width - 2,
@@ -2179,33 +2209,33 @@ local function drawDrive(y0)
     }
   end
 
-  addControl("standard", 1, 1, "STANDARD", "MODE", vehicleState.mode == "standard", colors.lightBlue)
-  addControl("sport", 2, 1, "SPORT", "MODE", vehicleState.mode == "sport", colors.orange)
-  addControl("sport_plus", 3, 1, "SPORT+", "MODE", vehicleState.mode == "sport_plus", colors.red)
+  addControl("standard", 1, 1, "STANDARD", "MODE", car.state.mode == "standard", colors.lightBlue)
+  addControl("sport", 2, 1, "SPORT", "MODE", car.state.mode == "sport", colors.orange)
+  addControl("sport_plus", 3, 1, "SPORT+", "MODE", car.state.mode == "sport_plus", colors.red)
 
-  addControl("clutch", 1, 2, "CLUTCH", "W", vehicleState.clutch, colors.lime)
-  addControl("reverse", 2, 2, "REVERSE", "S", vehicleState.reverse, colors.orange)
-  addControl("front_drive", 3, 2, "FRONT DRIVE", vehicleState.frontDriveOff and "OFF" or "ON", vehicleState.frontDriveOff, colors.red)
+  addControl("clutch", 1, 2, "CLUTCH", "W / S", car.state.clutch, colors.lime)
+  addControl("reverse", 2, 2, "REVERSE", "S", car.state.reverse, colors.orange)
+  addControl("front_drive", 3, 2, "FRONT DRIVE", car.state.frontDriveOff and "OFF" or "ON", car.state.frontDriveOff, colors.red)
 
-  addControl("drive_engine", 1, 3, "DRIVE ENGINE", vehicleState.driveEngineOff and "OFF" or "ON", vehicleState.driveEngineOff, colors.red)
-  addControl("work_engine", 2, 3, "SHOP ENGINE", vehicleState.workshopEngineOff and "OFF" or "ON", vehicleState.workshopEngineOff, colors.red)
-  addControl("boost", 3, 3, "SHOP BOOST", vehicleState.workshopBoost and "ON" or "OFF", vehicleState.workshopBoost, colors.orange)
+  addControl("drive_engine", 1, 3, "DRIVE ENGINE", car.state.driveEngineOff and "OFF" or "ON", car.state.driveEngineOff, colors.red)
+  addControl("work_engine", 2, 3, "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, colors.red)
+  addControl("boost", 3, 3, "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, colors.orange)
 
-  addControl("headlights", 1, 4, "HEADLIGHTS", "L", vehicleState.lighting == "headlights", colors.lightBlue)
-  addControl("left", 2, 4, "LEFT SIGNAL", "Z", vehicleState.lighting == "left", colors.yellow)
-  addControl("right", 3, 4, "RIGHT SIGNAL", "Z", vehicleState.lighting == "right", colors.yellow)
+  addControl("headlights", 1, 4, "HEADLIGHTS", "L", car.state.lighting == "headlights", colors.lightBlue)
+  addControl("left", 2, 4, "LEFT SIGNAL", "TOUCH", car.state.lighting == "left", colors.yellow)
+  addControl("right", 3, 4, "RIGHT SIGNAL", "Z", car.state.lighting == "right", colors.yellow)
 
-  addControl("hazard", 1, 5, "HAZARD", "X", vehicleState.lighting == "hazard", colors.red)
-  addControl("heading", 2, 5, "PORT HEADING", vehicleState.portHeading:upper(), false, colors.lightBlue)
+  addControl("hazard", 1, 5, "HAZARD", "X", car.state.lighting == "hazard", colors.red)
+  addControl("heading", 2, 5, "PORT HEADING", car.state.portHeading:upper(), false, colors.lightBlue)
 
   local statusY = y0 + 5 * (buttonH + gapY)
   if statusY <= layout.h then
-    local portStatus = carDevices.portName and ("Port: " .. carDevices.portName) or "Port: not found"
-    writeAt(centerWin, 2, statusY, trim(portStatus, layout.centerW - 2), carDevices.portName and COLORS.fg or colors.red, COLORS.bg)
+    local portStatus = car.devices.portName and ("Port: " .. car.devices.portName) or "Port: not found"
+    writeAt(centerWin, 2, statusY, trim(portStatus, layout.centerW - 2), car.devices.portName and COLORS.fg or colors.red, COLORS.bg)
   end
   if statusY + 1 <= layout.h then
-    local keyboardStatus = carDevices.keyboardName and ("Keyboard: " .. carDevices.keyboardName) or "Keyboard: not found"
-    writeAt(centerWin, 2, statusY + 1, trim(carDevices.error or keyboardStatus, layout.centerW - 2), carDevices.error and colors.red or COLORS.fg, COLORS.bg)
+    local keyboardStatus = car.devices.keyboardName and ("Keyboard: " .. car.devices.keyboardName) or "Keyboard: not found"
+    writeAt(centerWin, 2, statusY + 1, trim(car.devices.error or keyboardStatus, layout.centerW - 2), car.devices.error and colors.red or COLORS.fg, COLORS.bg)
   end
 end
 
@@ -2214,7 +2244,7 @@ local function drawComingSoon(y0)
   engineBox = nil
   actionBoxes = {}
   settingsBoxes = {}
-  driveBoxes = {}
+  car.driveBoxes = {}
 end
 
 local function drawCenter()
@@ -2241,12 +2271,12 @@ local function drawCenter()
   quickSettingsBox = nil
   modeStandardBox = nil
   modeSportBox = nil
-  driveBoxes = {}
+  car.driveBoxes = {}
 
   if id == "home" then
     drawHome(y0)
   elseif id == "drive" then
-    drawDrive(y0)
+    car.drawDrive(y0)
   elseif id == "stats" then
     drawStats(y0)
   elseif id == "about" then
@@ -2372,52 +2402,52 @@ local function selectTabById(id)
   return false
 end
 
-local function handleDriveControl(id)
+function car.handleDriveControl(id)
   if id == "standard" then
-    setDriveMode("normal")
+    car.setDriveMode("normal")
   elseif id == "sport" then
-    setDriveMode("sport")
+    car.setDriveMode("sport")
   elseif id == "sport_plus" then
-    setDriveMode("sport_plus")
+    car.setDriveMode("sport_plus")
   elseif id == "clutch" then
-    vehicleState.clutch = not vehicleState.clutch
-    cruiseOn = vehicleState.clutch
+    car.state.clutch = not car.state.clutch
+    car.cruiseOn = car.state.clutch
   elseif id == "reverse" then
-    vehicleState.reverse = not vehicleState.reverse
+    car.state.reverse = not car.state.reverse
   elseif id == "front_drive" then
-    vehicleState.frontDriveOff = not vehicleState.frontDriveOff
+    car.state.frontDriveOff = not car.state.frontDriveOff
   elseif id == "drive_engine" then
-    vehicleState.driveEngineOff = not vehicleState.driveEngineOff
-    engineOn = not vehicleState.driveEngineOff
+    car.state.driveEngineOff = not car.state.driveEngineOff
+    car.engineOn = not car.state.driveEngineOff
   elseif id == "work_engine" then
-    vehicleState.workshopEngineOff = not vehicleState.workshopEngineOff
+    car.state.workshopEngineOff = not car.state.workshopEngineOff
   elseif id == "boost" then
-    vehicleState.workshopBoost = not vehicleState.workshopBoost
+    car.state.workshopBoost = not car.state.workshopBoost
   elseif id == "headlights" then
-    setVehicleLighting("headlights")
+    car.setLighting("headlights")
     return true
   elseif id == "left" then
-    setVehicleLighting("left")
+    car.setLighting("left")
     return true
   elseif id == "right" then
-    setVehicleLighting("right")
+    car.setLighting("right")
     return true
   elseif id == "hazard" then
-    setVehicleLighting("hazard")
+    car.setLighting("hazard")
     return true
   elseif id == "heading" then
-    cyclePortHeading()
+    car.cyclePortHeading()
     return true
   else
     return false
   end
-  applyVehicleOutputs()
+  car.applyOutputs()
   return true
 end
 
 local function handleClick(mx, my)
-  for id, box in pairs(driveBoxes) do
-    if hit(box, mx, my) then return handleDriveControl(id) end
+  for id, box in pairs(car.driveBoxes) do
+    if hit(box, mx, my) then return car.handleDriveControl(id) end
   end
   if quickMapBox and hit(quickMapBox, mx, my) then
     if selectTabById("map") then return true end
@@ -2432,20 +2462,20 @@ local function handleClick(mx, my)
     end
   end
   if modeStandardBox and hit(modeStandardBox, mx, my) then
-    setDriveMode("normal")
+    car.setDriveMode("normal")
     return true
   end
   if modeSportBox and hit(modeSportBox, mx, my) then
-    setDriveMode("sport")
+    car.setDriveMode("sport")
     return true
   end
   if engineBox and hit(engineBox, mx, my) then
-    if canToggleEngine() then toggleEngine() end
+    if car.canToggleEngine() then car.toggleEngine() end
     return true
   end
   if cruiseBox and hit(cruiseBox, mx, my) then
-    cruiseOn = not cruiseOn
-    driveOutput(DRIVE_SIDE, cruiseOn)
+    car.cruiseOn = not car.cruiseOn
+    car.driveOutput(DRIVE_SIDE, car.cruiseOn)
     return true
   end
 
@@ -2456,16 +2486,16 @@ local function handleClick(mx, my)
       return true
     end
     if actionBoxes.engine and hit(actionBoxes.engine, mx, my) then
-      if isDiesel and canToggleEngine() then toggleEngine() end
+      if isDiesel and car.canToggleEngine() then car.toggleEngine() end
       return true
     end
     if actionBoxes.drive_mode and hit(actionBoxes.drive_mode, mx, my) then
-      setDriveMode((driveMode == "sport") and "normal" or "sport")
+      car.setDriveMode((car.driveMode == "sport") and "normal" or "sport")
       return true
     end
     if actionBoxes.cruise and hit(actionBoxes.cruise, mx, my) then
-      cruiseOn = not cruiseOn
-      driveOutput(DRIVE_SIDE, cruiseOn)
+      car.cruiseOn = not car.cruiseOn
+      car.driveOutput(DRIVE_SIDE, car.cruiseOn)
       return true
     end
     if actionBoxes.change_rrid and hit(actionBoxes.change_rrid, mx, my) then
@@ -2572,19 +2602,17 @@ local function handleClick(mx, my)
   return false
 end
 
-local lastVehicleBlink = os.clock()
-
-local function updateVehicleHardware()
-  scanCarDevices(false)
+function car.updateHardware()
+  car.scanDevices(false)
   local now = os.clock()
-  if now - lastVehicleBlink >= TURN_BLINK_SEC then
-    vehicleState.blink = not vehicleState.blink
-    lastVehicleBlink = now
+  if car.state.lighting ~= "none" and car.state.lighting ~= "headlights" and now - car.lastBlink >= car.blinkPeriod then
+    car.state.blink = not car.state.blink
+    car.lastBlink = now
   end
-  applyVehicleOutputs()
+  car.applyOutputs()
 end
 
-local function carKeyName(code)
+function car.keyName(code)
   if type(code) == "string" then return code:lower() end
   if keys and keys.getName then
     local ok, name = pcall(keys.getName, code)
@@ -2593,56 +2621,58 @@ local function carKeyName(code)
   return tostring(code or ""):lower()
 end
 
-local function handleCarKey(code, down, repeated)
-  local name = carKeyName(code)
+function car.handleKey(code, down, repeated)
+  local name = car.keyName(code)
   local fresh = down and not repeated
   if name == "w" then
-    vehicleState.wHeld = down
-    vehicleState.clutch = vehicleState.wHeld or cruiseOn
+    car.state.wHeld = down
+    car.state.clutch = car.state.wHeld or car.state.sHeld or car.cruiseOn
   elseif name == "s" then
-    vehicleState.sHeld = down
-    vehicleState.reverse = vehicleState.sHeld
+    car.state.sHeld = down
+    car.state.reverse = car.state.sHeld
+    car.state.clutch = car.state.wHeld or car.state.sHeld or car.cruiseOn
   elseif fresh and name == "g" then
-    vehicleState.frontDriveOff = not vehicleState.frontDriveOff
+    car.state.frontDriveOff = not car.state.frontDriveOff
   elseif fresh and name == "f" then
-    vehicleState.driveEngineOff = not vehicleState.driveEngineOff
-    engineOn = not vehicleState.driveEngineOff
+    car.state.driveEngineOff = not car.state.driveEngineOff
+    car.engineOn = not car.state.driveEngineOff
   elseif fresh and name == "l" then
-    setVehicleLighting("headlights")
+    car.setLighting("headlights")
     return true
   elseif fresh and name == "z" then
-    cycleVehicleIndicator()
+    car.toggleIndicator()
     return true
   elseif fresh and name == "x" then
-    setVehicleLighting("hazard")
+    car.setLighting("hazard")
     return true
   else
     return false
   end
-  applyVehicleOutputs()
+  car.applyOutputs()
   return true
 end
 
-local function releaseVehicleKeys()
-  vehicleState.wHeld = false
-  vehicleState.sHeld = false
-  vehicleState.clutch = cruiseOn
-  vehicleState.reverse = false
-  applyVehicleOutputs()
+function car.releaseKeys()
+  car.state.wHeld = false
+  car.state.sHeld = false
+  car.state.clutch = car.cruiseOn
+  car.state.reverse = false
+  car.applyOutputs()
 end
 
-local function safeVehicleShutdown()
-  vehicleState.mode = "standard"
-  vehicleState.clutch = false
-  vehicleState.reverse = false
-  vehicleState.wHeld = false
-  vehicleState.sHeld = false
-  vehicleState.frontDriveOff = false
-  vehicleState.workshopEngineOff = true
-  vehicleState.driveEngineOff = true
-  vehicleState.workshopBoost = false
-  vehicleState.lighting = "none"
-  applyVehicleOutputs()
+function car.safeShutdown()
+  car.state.mode = "standard"
+  car.state.clutch = false
+  car.state.reverse = false
+  car.state.wHeld = false
+  car.state.sHeld = false
+  car.state.frontDriveOff = false
+  car.state.workshopEngineOff = true
+  car.state.driveEngineOff = true
+  car.state.workshopBoost = false
+  car.state.lighting = "none"
+  car.state.blink = false
+  car.applyOutputs()
 end
 
 local function drawCrash(err)
@@ -2690,11 +2720,11 @@ local function main()
 
     if ev == "timer" and a == timer then
       pcall(tick)
-      pcall(updateVehicleHardware)
+      pcall(car.updateHardware)
       redraw()
       timer = os.startTimer(TICK)
-    elseif ev == "timer" and pulseTimer and a == pulseTimer then
-      stopPulse()
+    elseif ev == "timer" and car.pulseTimer and a == car.pulseTimer then
+      car.stopPulse()
 
     elseif ev == "monitor_touch" then
       local mx, my = b, c
@@ -2705,24 +2735,24 @@ local function main()
       if handleClick(mx, my) then redraw() end
 
     elseif ev == "key" then
-      if handleCarKey(a, true, b == true) then redraw() end
+      if car.handleKey(a, true, b == true) then redraw() end
 
     elseif ev == "key_up" then
-      if handleCarKey(a, false, false) then redraw() end
+      if car.handleKey(a, false, false) then redraw() end
 
     elseif ev == "tm_keyboard_key" then
-      if handleCarKey(b, true, c == true) then redraw() end
+      if car.handleKey(b, true, c == true) then redraw() end
 
     elseif ev == "tm_keyboard_key_up" then
-      if handleCarKey(b, false, false) then redraw() end
+      if car.handleKey(b, false, false) then redraw() end
 
     elseif ev == "portable_disconnect" or ev == "tm_keyboard_portable_disconnect" then
-      releaseVehicleKeys()
+      car.releaseKeys()
       redraw()
 
     elseif ev == "peripheral" or ev == "peripheral_detach" then
-      scanCarDevices(true)
-      applyVehicleOutputs()
+      car.scanDevices(true)
+      car.applyOutputs()
       rebuildUI()
       redraw()
 
@@ -2734,4 +2764,4 @@ local function main()
 end
 
 local ok, err = xpcall(main, debug and debug.traceback or function(e) return e end)
-if not ok then safeVehicleShutdown(); drawCrash(err) end
+if not ok then car.safeShutdown(); drawCrash(err) end
