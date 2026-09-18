@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.3.0"
+local VERSION = _G.ROADROVER_VERSION or "2.3.1"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -116,7 +116,7 @@ local car = {
   outputCache = { chassis = {}, port = {} },
   blinkPeriod = 0.55,
   lastBlink = os.clock(),
-  engineOn = false,
+  engineOn = true,
   pulseTimer = nil,
   cruiseOn = false,
   driveMode = "normal",
@@ -654,7 +654,7 @@ car.state = {
   reverse = false,
   frontDriveOff = false,
   workshopEngineOff = false,
-  driveEngineOff = true,
+  driveEngineOff = false,
   workshopBoost = false,
   lighting = "none",
   blink = false,
@@ -814,8 +814,10 @@ function car.setLighting(mode)
   car.applyOutputs()
 end
 
-function car.toggleIndicator()
-  car.setLighting("right")
+function car.toggleIndicator(side)
+  if side ~= "left" and side ~= "right" then return false end
+  car.setLighting(side)
+  return true
 end
 
 function car.cyclePortHeading()
@@ -881,7 +883,7 @@ function car.setDriveMode(mode)
 end
 
 car.scanDevices(true)
-car.engineOutput(ENGINE_SIDE, not isDiesel)
+car.engineOutput(ENGINE_SIDE, true)
 car.setDriveMode(car.driveMode)
 car.driveOutput(DRIVE_SIDE, false)
 
@@ -1634,7 +1636,6 @@ end
 
 local tabs = {
   { id = "home", title = "Home", label = "Home", page = 1 },
-  { id = "drive", title = "Drive Controls", label = "Drive", page = 1 },
   { id = "settings", title = "Settings", label = "Set", page = 1 },
   { id = "stats", title = "Statistics", label = "Stats", page = 1 },
   { id = "map", title = "Map", label = "Map", page = 2 },
@@ -2250,8 +2251,8 @@ function car.drawDrive(y0)
   addControl("boost", 3, 3, "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, colors.orange)
 
   addControl("headlights", 1, 4, "HEADLIGHTS", "L", car.state.lighting == "headlights", colors.lightBlue)
-  addControl("left", 2, 4, "LEFT SIGNAL", "TOUCH", car.state.lighting == "left", colors.yellow)
-  addControl("right", 3, 4, "RIGHT SIGNAL", "Z", car.state.lighting == "right", colors.yellow)
+  addControl("left", 2, 4, "LEFT SIGNAL", "Z", car.state.lighting == "left", colors.yellow)
+  addControl("right", 3, 4, "RIGHT SIGNAL", "C", car.state.lighting == "right", colors.yellow)
 
   addControl("hazard", 1, 5, "HAZARD", "X", car.state.lighting == "hazard", colors.red)
   addControl("heading", 2, 5, "PORT HEADING", car.state.portHeading:upper(), false, colors.lightBlue)
@@ -2515,6 +2516,14 @@ function car.hdButton(id, x, y, width, height, label, sublabel, active, accent)
   if id then car.hdHit(id, x, y, width, height) end
 end
 
+function car.hdModeButton(id, x, y, width, height, label, active)
+  local background = active and 0x000000 or car.palette.surfaceRaised
+  car.hdRound(x, y, width, height, 5, background)
+  car.hdOutline(x, y, width, height, active and car.palette.text or car.palette.border)
+  car.hdCenteredText(x, y + math.floor((height - 9) / 2), width, label, car.palette.text, 1)
+  car.hdHit(id, x, y, width, height)
+end
+
 function car.hdSpeed()
   local kmh = speedBps * 3.6
   if settings.units == "MP/H" then return kmh * 0.621371, "MPH" end
@@ -2524,25 +2533,27 @@ end
 
 function car.drawHDNav(navX, top, width, height)
   local items = {
-    { "HOME", 1 },
-    { "DRIVE", 2 },
-    { "STATS", 4 },
-    { "SET", 3 },
-    { "ABOUT", 6 }
+    { "HOME", "home" },
+    { "STATS", "stats" },
+    { "SET", "settings" },
+    { "ABOUT", "about" }
   }
   local gap = 4
   local itemH = math.floor((height - gap * (#items - 1)) / #items)
   for i = 1, #items do
     local y = top + (i - 1) * (itemH + gap)
-    car.hdButton("tab:" .. tostring(items[i][2]), navX, y, width, itemH, items[i][1], nil, activeTab == items[i][2], car.palette.blue)
+    local selected = tabs[activeTab] and tabs[activeTab].id == items[i][2]
+    car.hdButton("tabid:" .. items[i][2], navX, y, width, itemH, items[i][1], nil, selected, car.palette.blue)
   end
 end
 
 function car.drawHDHome(x, y, width, height)
-  local speedW = math.max(88, math.floor(width * 0.32))
-  local gap = 8
-  local mainX = x + speedW + gap
-  local mainW = width - speedW - gap
+  local speedW = math.max(86, math.floor(width * 0.30))
+  local gap = 6
+  local modeW = 34
+  local modeX = x + speedW + gap
+  local actionX = modeX + modeW + gap
+  local actionW = width - speedW - modeW - gap * 2
   car.hdRound(x, y, speedW, height, 7, car.palette.surface)
   car.hdText(x + 10, y + 9, "SPEED", car.palette.muted, 1)
   local speed, unit = car.hdSpeed()
@@ -2553,29 +2564,30 @@ function car.drawHDHome(x, y, width, height)
   local gear = car.state.reverse and "R" or (car.state.clutch and "D" or "P")
   car.hdCenteredText(x, y + height - 41, speedW, gear, car.state.reverse and car.palette.orange or car.palette.green, 3)
 
-  local modeGap = 4
-  local modeW = math.floor((mainW - modeGap * 2) / 3)
-  car.hdButton("control:standard", mainX, y, modeW, 28, "STANDARD", nil, car.state.mode == "standard", car.palette.blue)
-  car.hdButton("control:sport", mainX + modeW + modeGap, y, modeW, 28, "SPORT", nil, car.state.mode == "sport", car.palette.orange)
-  car.hdButton("control:sport_plus", mainX + (modeW + modeGap) * 2, y, mainW - (modeW + modeGap) * 2, 28, "SPORT+", nil, car.state.mode == "sport_plus", car.palette.red)
+  local modeGap = 5
+  local modeH = math.floor((height - modeGap * 2) / 3)
+  car.hdModeButton("control:standard", modeX, y, modeW, modeH, "ST", car.state.mode == "standard")
+  car.hdModeButton("control:sport", modeX, y + modeH + modeGap, modeW, modeH, "S", car.state.mode == "sport")
+  car.hdModeButton("control:sport_plus", modeX, y + (modeH + modeGap) * 2, modeW, height - (modeH + modeGap) * 2, "S+", car.state.mode == "sport_plus")
 
-  local statusY = y + 34
-  car.hdRound(mainX, statusY, mainW, 32, 5, car.palette.surface)
-  car.hdText(mainX + 9, statusY + 6, car.state.driveEngineOff and "ENGINE OFF" or "ENGINE READY", car.state.driveEngineOff and car.palette.red or car.palette.green, 1)
-  car.hdText(mainX + 9, statusY + 17, car.state.frontDriveOff and "FRONT DRIVE OFF" or "ALL WHEEL DRIVE", car.palette.muted, 1)
-  car.hdText(mainX + mainW - 54, statusY + 11, car.state.clutch and "CLUTCH" or "IDLE", car.state.clutch and car.palette.green or car.palette.muted, 1)
-
-  local controlsY = statusY + 38
   local controlsGap = 5
-  local controlW = math.floor((mainW - controlsGap * 2) / 3)
-  local controlH = math.floor((height - (controlsY - y) - controlsGap) / 2)
-  car.hdButton("control:drive_engine", mainX, controlsY, controlW, controlH, "ENGINE", car.state.driveEngineOff and "OFF" or "ON", not car.state.driveEngineOff, car.palette.green)
-  car.hdButton("control:clutch", mainX + controlW + controlsGap, controlsY, controlW, controlH, "CLUTCH", "W / S", car.state.clutch, car.palette.green)
-  car.hdButton("control:reverse", mainX + (controlW + controlsGap) * 2, controlsY, mainW - (controlW + controlsGap) * 2, controlH, "REVERSE", "S", car.state.reverse, car.palette.orange)
-  local secondY = controlsY + controlH + controlsGap
-  car.hdButton("control:headlights", mainX, secondY, controlW, height - (secondY - y), "LIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan)
-  car.hdButton("control:right", mainX + controlW + controlsGap, secondY, controlW, height - (secondY - y), "SIGNAL", "Z", car.state.lighting == "right", car.palette.yellow)
-  car.hdButton("control:hazard", mainX + (controlW + controlsGap) * 2, secondY, mainW - (controlW + controlsGap) * 2, height - (secondY - y), "HAZARD", "X", car.state.lighting == "hazard", car.palette.red)
+  local controlW = math.floor((actionW - controlsGap * 2) / 3)
+  local controlH = math.floor((height - controlsGap * 2) / 3)
+  local thirdW = actionW - (controlW + controlsGap) * 2
+  car.hdButton("control:work_engine", actionX, y, controlW, controlH, "WORKSHOP", "STOP", car.state.workshopEngineOff, car.palette.red)
+  car.hdButton("control:drive_engine", actionX + controlW + controlsGap, y, controlW, controlH, "DRIVE", "STOP", car.state.driveEngineOff, car.palette.red)
+  car.hdButton("control:cruise", actionX + (controlW + controlsGap) * 2, y, thirdW, controlH, "CRUISE", car.cruiseOn and "ON" or "OFF", car.cruiseOn, car.palette.green)
+
+  local secondY = y + controlH + controlsGap
+  car.hdButton("control:front_drive", actionX, secondY, controlW, controlH, "DRIVE", car.state.frontDriveOff and "2WD" or "AWD", not car.state.frontDriveOff, car.palette.blue)
+  car.hdButton("control:headlights", actionX + controlW + controlsGap, secondY, controlW, controlH, "LIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan)
+  car.hdButton("control:boost", actionX + (controlW + controlsGap) * 2, secondY, thirdW, controlH, "SHOP", "BOOST", car.state.workshopBoost, car.palette.orange)
+
+  local thirdY = y + (controlH + controlsGap) * 2
+  local signalText = car.state.lighting == "left" and "LEFT" or (car.state.lighting == "right" and "RIGHT" or (car.state.lighting == "hazard" and "HAZARD" or "OFF"))
+  car.hdButton(nil, actionX, thirdY, controlW, height - (thirdY - y), "GEAR", gear, car.state.reverse, car.palette.orange)
+  car.hdButton(nil, actionX + controlW + controlsGap, thirdY, controlW, height - (thirdY - y), "CLUTCH", car.state.clutch and "ACTIVE" or "OPEN", car.state.clutch, car.palette.green)
+  car.hdButton(nil, actionX + (controlW + controlsGap) * 2, thirdY, thirdW, height - (thirdY - y), "SIGNAL", signalText, car.state.lighting ~= "none" and car.state.lighting ~= "headlights", car.palette.yellow)
 end
 
 function car.drawHDDrive(x, y, width, height)
@@ -2590,8 +2602,8 @@ function car.drawHDDrive(x, y, width, height)
     { "work_engine", "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, car.palette.red },
     { "boost", "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, car.palette.orange },
     { "headlights", "HEADLIGHTS", "L", car.state.lighting == "headlights", car.palette.cyan },
-    { "left", "LEFT SIGNAL", "TOUCH", car.state.lighting == "left", car.palette.yellow },
-    { "right", "RIGHT SIGNAL", "Z", car.state.lighting == "right", car.palette.yellow },
+    { "left", "LEFT SIGNAL", "Z", car.state.lighting == "left", car.palette.yellow },
+    { "right", "RIGHT SIGNAL", "C", car.state.lighting == "right", car.palette.yellow },
     { "hazard", "HAZARD", "X", car.state.lighting == "hazard", car.palette.red },
     { "heading", "PORT HEADING", car.state.portHeading:upper(), false, car.palette.blue },
     { nil, "PORT", car.devices.portName and "CONNECTED" or "MISSING", car.devices.portName ~= nil, car.palette.green }
@@ -2664,6 +2676,7 @@ function car.drawHD()
   local modeLabel = car.state.mode == "sport_plus" and "SPORT+" or car.state.mode:upper()
   car.hdText(86, 8, modeLabel, car.state.mode == "standard" and car.palette.blue or car.palette.orange, 1)
   local timeText = os.date("%H:%M")
+  if width >= 360 then car.hdText(150, 8, "Z:L  C:R  X:HAZ", car.palette.muted, 1) end
   car.hdText(width - car.hdTextWidth(timeText, 1) - 9, 8, timeText, car.palette.text, 1)
 
   local margin = 8
@@ -2695,9 +2708,15 @@ function car.handleHDClick(x, y)
   for i = #car.hd.hits, 1, -1 do
     local target = car.hd.hits[i]
     if x >= target.x and x <= target.x + target.w - 1 and y >= target.y and y <= target.y + target.h - 1 then
-      if target.id:sub(1, 4) == "tab:" then
-        activeTab = tonumber(target.id:sub(5)) or activeTab
-        tabPage = (tabs[activeTab] and tabs[activeTab].page) or tabPage
+      if target.id:sub(1, 6) == "tabid:" then
+        local wanted = target.id:sub(7)
+        for tabIndex = 1, #tabs do
+          if tabs[tabIndex].id == wanted then
+            activeTab = tabIndex
+            tabPage = tabs[tabIndex].page or tabPage
+            break
+          end
+        end
       elseif target.id:sub(1, 8) == "control:" then
         car.handleDriveControl(target.id:sub(9))
       elseif target.id == "setting:units" then
@@ -2751,6 +2770,10 @@ function car.handleDriveControl(id)
   elseif id == "clutch" then
     car.state.clutch = not car.state.clutch
     car.cruiseOn = car.state.clutch
+  elseif id == "cruise" then
+    car.cruiseOn = not car.cruiseOn
+    car.driveOutput(DRIVE_SIDE, car.cruiseOn)
+    return true
   elseif id == "reverse" then
     car.state.reverse = not car.state.reverse
   elseif id == "front_drive" then
@@ -2979,7 +3002,10 @@ function car.handleKey(code, down, repeated)
     car.setLighting("headlights")
     return true
   elseif fresh and name == "z" then
-    car.toggleIndicator()
+    car.toggleIndicator("left")
+    return true
+  elseif fresh and name == "c" then
+    car.toggleIndicator("right")
     return true
   elseif fresh and name == "x" then
     car.setLighting("hazard")
