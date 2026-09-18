@@ -16,7 +16,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.8"
+local VERSION = _G.ROADROVER_VERSION or "2.4.9"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -125,7 +125,8 @@ local car = {
     width = 384,
     height = 192,
     hits = {},
-    gpuName = nil
+    gpuName = nil,
+    profile = nil
   },
   palette = {
     background = 0x080B10,
@@ -718,7 +719,17 @@ function car.scanDevices(force)
   if portCandidates[1] then
     car.devices.portName, car.devices.port = portCandidates[1].name, portCandidates[1].device
   end
-  if portCandidates[2] then
+  if car.devices.port and type(car.devices.port.getPortCount) == "function" and type(car.devices.port.getPort) == "function" then
+    local countOK, count = pcall(car.devices.port.getPortCount)
+    if countOK and tonumber(count) and tonumber(count) >= 2 then
+      local portOK, chainPort = pcall(car.devices.port.getPort, 2)
+      if portOK and chainPort then
+        car.devices.secondaryPortName = tostring(car.devices.portName) .. "#2"
+        car.devices.secondaryPort = chainPort
+      end
+    end
+  end
+  if not car.devices.secondaryPort and portCandidates[2] then
     car.devices.secondaryPortName, car.devices.secondaryPort = portCandidates[2].name, portCandidates[2].device
   end
   if car.devices.keyboard and car.devices.keyboard.setFireNativeEvents then
@@ -1096,9 +1107,17 @@ local function rebuildUI()
 
   local w, h = term.getSize()
   local compact = w < 48 or h < 12
-  local leftW = compact and clamp(math.floor(w * 0.25), 7, math.max(7, w - 12)) or math.floor(w / 3)
-  local rightW = compact and clamp(math.floor(w * 0.16), 5, math.max(5, w - leftW - 8))
-    or clamp(math.floor(math.max(1, w - (2 * math.floor(w / 3))) * 0.22), 6, 10)
+  local hdCompact = car.hd.ready and w >= 64 and h >= 16
+  local leftW
+  local rightW
+  if hdCompact then
+    leftW = clamp(math.floor(w * 0.15), 10, 15)
+    rightW = clamp(math.floor(w * 0.10), 7, 10)
+  else
+    leftW = compact and clamp(math.floor(w * 0.25), 7, math.max(7, w - 12)) or math.floor(w / 3)
+    rightW = compact and clamp(math.floor(w * 0.16), 5, math.max(5, w - leftW - 8))
+      or clamp(math.floor(math.max(1, w - (2 * math.floor(w / 3))) * 0.22), 6, 10)
+  end
   local centerW = w - leftW - rightW
 
   local leftX = 1
@@ -1114,7 +1133,8 @@ local function rebuildUI()
     leftX = leftX, centerX = centerX, rightX = rightX,
     leftW = leftW, centerW = centerW, rightW = rightW,
     monW = leftW, rightMonitorW = rightW,
-    compact = compact
+    compact = compact,
+    hdCompact = hdCompact
   }
 end
 
@@ -2080,11 +2100,12 @@ end
 
 function car.drawHomeControls(top, availableH, controlsX, controlsW)
   if controlsW < 6 then return end
-  local columns = 2
-  local rows = 4
+  local columns = layout.hdCompact and 4 or 2
+  local rows = layout.hdCompact and 2 or 4
   local buttonGap = availableH < 11 and 0 or 1
   local buttonW = math.floor((controlsW - buttonGap) / columns)
   local buttonH = math.max(1, math.floor((availableH - buttonGap * (rows - 1)) / rows))
+  if layout.hdCompact then buttonH = math.min(4, buttonH) end
   local controls = {
     { id = "work_engine", title = "WORKSHOP", status = car.state.workshopEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.workshopEngineOff },
     { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "ENGINE OFF" or "ENGINE ON", active = car.state.driveEngineOff },
@@ -2385,8 +2406,8 @@ function car.drawDrive(y0)
   local margin = 1
   local gapX = 1
   local gapY = 1
-  local columns = 3
-  local buttonH = 2
+  local columns = layout.hdCompact and 5 or 3
+  local buttonH = layout.hdCompact and 3 or 2
   local availableH = layout.h - y0 + 1
   if availableH < 16 then
     buttonH = 1
@@ -2422,26 +2443,31 @@ function car.drawDrive(y0)
     }
   end
 
-  addControl("standard", 1, 1, "STANDARD", "MODE", car.state.mode == "standard", colors.lightBlue)
-  addControl("sport", 2, 1, "SPORT", "MODE", car.state.mode == "sport", colors.orange)
-  addControl("sport_plus", 3, 1, "SPORT+", "MODE", car.state.mode == "sport_plus", colors.red)
+  local controls = {
+    { "standard", "STANDARD", "MODE", car.state.mode == "standard", colors.lightBlue },
+    { "sport", "SPORT", "MODE", car.state.mode == "sport", colors.orange },
+    { "sport_plus", "SPORT+", "MODE", car.state.mode == "sport_plus", colors.red },
+    { "clutch", "CLUTCH", "W / S", car.state.clutch, colors.lime },
+    { "reverse", "REVERSE", "S", car.state.reverse, colors.orange },
+    { "front_drive", "FRONT DRIVE", car.state.frontDriveOff and "OFF" or "ON", car.state.frontDriveOff, colors.red },
+    { "drive_engine", "DRIVE ENGINE", car.state.driveEngineOff and "OFF" or "ON", car.state.driveEngineOff, colors.red },
+    { "work_engine", "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, colors.red },
+    { "boost", "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, colors.orange },
+    { "headlights", "HEADLIGHTS", "L", car.state.lighting == "headlights", colors.lightBlue },
+    { "left", "LEFT SIGNAL", "Z", car.state.lighting == "left", colors.yellow },
+    { "right", "RIGHT SIGNAL", "C", car.state.lighting == "right", colors.yellow },
+    { "hazard", "HAZARD", "X", car.state.lighting == "hazard", colors.red },
+    { "heading", "PORT HEADING", car.state.portHeading:upper(), false, colors.lightBlue }
+  }
+  for index = 1, #controls do
+    local control = controls[index]
+    local column = ((index - 1) % columns) + 1
+    local row = math.floor((index - 1) / columns) + 1
+    addControl(control[1], column, row, control[2], control[3], control[4], control[5])
+  end
 
-  addControl("clutch", 1, 2, "CLUTCH", "W / S", car.state.clutch, colors.lime)
-  addControl("reverse", 2, 2, "REVERSE", "S", car.state.reverse, colors.orange)
-  addControl("front_drive", 3, 2, "FRONT DRIVE", car.state.frontDriveOff and "OFF" or "ON", car.state.frontDriveOff, colors.red)
-
-  addControl("drive_engine", 1, 3, "DRIVE ENGINE", car.state.driveEngineOff and "OFF" or "ON", car.state.driveEngineOff, colors.red)
-  addControl("work_engine", 2, 3, "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, colors.red)
-  addControl("boost", 3, 3, "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, colors.orange)
-
-  addControl("headlights", 1, 4, "HEADLIGHTS", "L", car.state.lighting == "headlights", colors.lightBlue)
-  addControl("left", 2, 4, "LEFT SIGNAL", "Z", car.state.lighting == "left", colors.yellow)
-  addControl("right", 3, 4, "RIGHT SIGNAL", "C", car.state.lighting == "right", colors.yellow)
-
-  addControl("hazard", 1, 5, "HAZARD", "X", car.state.lighting == "hazard", colors.red)
-  addControl("heading", 2, 5, "PORT HEADING", car.state.portHeading:upper(), false, colors.lightBlue)
-
-  local statusY = y0 + 5 * (buttonH + gapY)
+  local controlRows = math.ceil(#controls / columns)
+  local statusY = y0 + controlRows * (buttonH + gapY)
   if statusY <= layout.h then
     local portStatus = car.devices.portName and ("Port: " .. car.devices.portName) or "Port: not found"
     writeAt(centerWin, 2, statusY, trim(portStatus, layout.centerW - 2), car.devices.portName and COLORS.fg or colors.red, COLORS.bg)

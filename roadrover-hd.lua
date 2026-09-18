@@ -360,6 +360,7 @@ return function(car, context)
     end
     if not force and car.hd.ready and car.hd.gpuName == car.devices.gpuName then return true end
     local detectedWidth, detectedHeight
+    local hdProfile
     local ok, setupError = pcall(function()
       for _ = 1, 8 do
         if type(gpu.refreshSize) == "function" then gpu.refreshSize() end
@@ -374,7 +375,16 @@ return function(car, context)
         end
       end
       if not detectedWidth then error("GPU monitor size is 0x0; check GPU cable and monitor", 0) end
-      if type(gpu.setSize) == "function" then gpu.setSize(64) end
+      if type(gpu.getHDProfile) == "function" then
+        local profileOK, profile = pcall(gpu.getHDProfile)
+        if profileOK and type(profile) == "table" then hdProfile = profile end
+      end
+      local targetDensity = hdProfile and tonumber(hdProfile.recommendedPixelDensity) or 64
+      targetDensity = math.floor(math.max(16, math.min(96, targetDensity)))
+      if type(gpu.setSize) == "function" then
+        local densityOK = pcall(gpu.setSize, targetDensity)
+        if not densityOK and targetDensity ~= 64 then gpu.setSize(64) end
+      end
       if sleep then sleep(0.2) end
       if type(gpu.getSize) == "function" then
         local width, height = gpu.getSize()
@@ -382,6 +392,10 @@ return function(car, context)
         if width and height and width > 0 and height > 0 then
           detectedWidth, detectedHeight = width, height
         end
+      end
+      if type(gpu.getHDProfile) == "function" then
+        local profileOK, profile = pcall(gpu.getHDProfile)
+        if profileOK and type(profile) == "table" then hdProfile = profile end
       end
     end)
     if not ok then
@@ -391,8 +405,11 @@ return function(car, context)
     end
     car.hd.width = math.floor(detectedWidth)
     car.hd.height = math.floor(detectedHeight)
-    terminalState.cellWidth = compactFont and tonumber(compactFont.cellWidth) or 6
-    terminalState.cellHeight = compactFont and tonumber(compactFont.cellHeight) or 8
+    car.hd.profile = hdProfile
+    terminalState.cellWidth = hdProfile and tonumber(hdProfile.terminalCellWidth)
+      or (compactFont and tonumber(compactFont.cellWidth)) or 6
+    terminalState.cellHeight = hdProfile and tonumber(hdProfile.terminalCellHeight)
+      or (compactFont and tonumber(compactFont.cellHeight)) or 8
     terminalState.width = math.max(1, math.floor(car.hd.width / terminalState.cellWidth))
     terminalState.height = math.max(1, math.floor(car.hd.height / terminalState.cellHeight))
     terminalState.offsetX = math.floor((car.hd.width - terminalState.width * terminalState.cellWidth) / 2) + 1
