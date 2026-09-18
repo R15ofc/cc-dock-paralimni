@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.4.1"
+local VERSION = _G.ROADROVER_VERSION or "2.4.2"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -1461,13 +1461,9 @@ local function ensureProfile()
   if rrid and rrid ~= "" then
     return setCurrentUser(rrid)
   end
-  while true do
-    local created = promptRRID("RoadRover Setup", false)
-    if created and created ~= "" then
-      saveRRID(created)
-      return setCurrentUser(created)
-    end
-  end
+  local created = sanitizeRRIDInput(_G.ROADROVER_DEFAULT_USER or "DRIVER")
+  saveRRID(created)
+  return setCurrentUser(created)
 end
 
 local function listExistingUsers()
@@ -2805,6 +2801,7 @@ function car.safeShutdown()
 end
 
 local function drawCrash(err)
+  if car.drawHDError then pcall(car.drawHDError, err) end
   term.redirect(ui)
   local w, h = term.getSize()
   term.setBackgroundColor(themeColor(colors.black))
