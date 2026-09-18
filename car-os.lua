@@ -16,7 +16,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.1"
+local VERSION = _G.ROADROVER_VERSION or "2.7.2"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -120,6 +120,7 @@ local car = {
   pulseTimer = nil,
   suspensionTimer = nil,
   suspensionFallbackSeconds = 0.7,
+  pointer = { down = false, lastSeen = -1e9, x = nil, y = nil },
   cruiseOn = false,
   driveMode = "normal",
   animations = {
@@ -4003,9 +4004,33 @@ function car.handlePointer(mx, my, isDown, supportsRelease)
   if direction then
     car.bumpAnimation("home:" .. id)
     car.bumpAnimation("drive:" .. id)
-    return car.setSuspension(direction, true)
+    return car.setSuspension(direction, not supportsRelease)
   end
   return handleClick(mx, my)
+end
+
+function car.handleTouchEvent(mx, my, pressed, hasRelease)
+  local pointer = car.pointer
+  local now = os.clock()
+  if not hasRelease then return car.handlePointer(mx, my, true, false) end
+  if pressed then
+    pointer.lastSeen = now
+    pointer.x, pointer.y = mx, my
+    if pointer.down then
+      local direction = car.suspensionControlAt(mx, my)
+      if direction then return car.setSuspension(direction, false) end
+      return false
+    end
+    pointer.down = true
+    return car.handlePointer(mx, my, true, true)
+  end
+  if pointer.down then
+    pointer.down = false
+    pointer.lastSeen = now
+    pointer.x, pointer.y = nil, nil
+    return car.handlePointer(mx, my, false, true)
+  end
+  return car.handlePointer(mx, my, true, false)
 end
 
 function car.updateHardware()
@@ -4013,6 +4038,11 @@ function car.updateHardware()
   pcall(car.updateMap, false)
   pcall(car.updateAutopilot)
   local now = os.clock()
+  if car.pointer.down and now - car.pointer.lastSeen > 0.8 then
+    car.pointer.down = false
+    car.pointer.x, car.pointer.y = nil, nil
+    car.releaseSuspension()
+  end
   if car.state.lighting ~= "none" and car.state.lighting ~= "headlights" and now - car.lastBlink >= car.blinkPeriod then
     car.state.blink = not car.state.blink
     car.lastBlink = now
@@ -4199,23 +4229,23 @@ local function main()
       if car.hdToTermPoint then mx, my = car.hdToTermPoint(b, c) end
       local hasRelease = type(d) == "boolean"
       local pressed = hasRelease and d or true
-      if mx and my and car.handlePointer(mx, my, pressed, hasRelease) then redraw() end
+      if mx and my and car.handleTouchEvent(mx, my, pressed, hasRelease) then redraw() end
 
     elseif ev == "tm_monitor_mouse_click" then
       local mx, my
       if car.hdToTermPoint then mx, my = car.hdToTermPoint(a, b, c, d) end
-      if mx and my and car.handlePointer(mx, my, true, false) then redraw() end
+      if mx and my and car.handleTouchEvent(mx, my, true, false) then redraw() end
 
     elseif ev == "monitor_touch" then
       local mx, my = b, c
-      if car.handlePointer(mx, my, true, false) then redraw() end
+      if car.handleTouchEvent(mx, my, true, false) then redraw() end
 
     elseif ev == "mouse_click" then
       local mx, my = b, c
-      if car.handlePointer(mx, my, true, true) then redraw() end
+      if car.handleTouchEvent(mx, my, true, true) then redraw() end
 
     elseif ev == "mouse_up" then
-      if car.handlePointer(b, c, false, true) then redraw() end
+      if car.handleTouchEvent(b, c, false, true) then redraw() end
 
     elseif ev == "key" then
       if car.handleKey(a, true, b == true) then redraw() end
