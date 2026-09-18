@@ -37,7 +37,7 @@ if fs.exists(BACKUP) then fs.delete(BACKUP) end
 if not fs.exists(VEHICLE_INFO) then
   local info = fs.open(VEHICLE_INFO, "w")
   if info then
-    info.write('{"model":"RoadRover","generation":"1","engineType":"Diesel","sedan":false,"portHeading":"north"}')
+    info.write('{"model":"RoadRover","generation":"1","engineType":"Diesel","sedan":false,"portHeading":"east"}')
     info.close()
   end
 end

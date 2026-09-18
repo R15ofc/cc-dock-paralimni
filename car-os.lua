@@ -18,7 +18,7 @@ local BIGFONT_ID = "3LfWxRWh"
 local BIGFONT_URL = "https://pastebin.com/raw/" .. BIGFONT_ID
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.3.1"
+local VERSION = _G.ROADROVER_VERSION or "2.4.0"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -103,6 +103,8 @@ local car = {
   devices = {
     portName = nil,
     port = nil,
+    secondaryPortName = nil,
+    secondaryPort = nil,
     keyboardName = nil,
     keyboard = nil,
     gpuName = nil,
@@ -113,7 +115,7 @@ local car = {
   headingOrder = { "north", "east", "south", "west" },
   headingValid = { north = true, east = true, south = true, west = true },
   driveBoxes = {},
-  outputCache = { chassis = {}, port = {} },
+  outputCache = { chassis = {}, port = {}, secondary = {} },
   blinkPeriod = 0.55,
   lastBlink = os.clock(),
   engineOn = true,
@@ -150,7 +152,7 @@ local DEFAULT_SMOOTH = tonumber(_G.ROADROVER_SMOOTH) or 4
 local DEFAULT_SMOOTH_ENABLED = (_G.ROADROVER_SMOOTH_ENABLED ~= 0 and _G.ROADROVER_SMOOTH_ENABLED ~= "0" and _G.ROADROVER_SMOOTH_ENABLED ~= false)
 local DEFAULT_DEBUG = DEBUG
 local DEFAULT_NIGHT_MODE = (_G.ROADROVER_NIGHT_MODE == true or _G.ROADROVER_NIGHT_MODE == 1 or _G.ROADROVER_NIGHT_MODE == "1")
-local DEFAULT_PORT_HEADING = tostring(_G.ROADROVER_PORT_HEADING or "north"):lower()
+local DEFAULT_PORT_HEADING = "east"
 
 local function displayUserName()
   return displayRRID(USER_NAME, RRID_MAX)
@@ -356,7 +358,8 @@ local function loadUserSettings()
   NIGHT_MODE = settings.nightMode and true or false
   _G.ROADROVER_NIGHT_MODE = NIGHT_MODE and 1 or 0
   applyNightMode()
-  if car.state then car.state.portHeading = settings.portHeading end
+  settings.portHeading = "east"
+  if car.state then car.state.portHeading = "east" end
   return true
 end
 
@@ -660,7 +663,10 @@ car.state = {
   blink = false,
   wHeld = false,
   sHeld = false,
-  portHeading = tostring(vehicleInfo.portHeading or settings.portHeading or "north"):lower()
+  aHeld = false,
+  dHeld = false,
+  suspension = "neutral",
+  portHeading = "east"
 }
 
 if not car.headingValid[car.state.portHeading] then car.state.portHeading = "north" end
@@ -688,7 +694,10 @@ function car.scanDevices(force)
   if not force and now - car.devices.lastScan < 2 then return end
   car.devices.lastScan = now
   local previousPortName = car.devices.portName
+  local previousSecondaryPortName = car.devices.secondaryPortName
+  local portCandidates = {}
   car.devices.portName, car.devices.port = nil, nil
+  car.devices.secondaryPortName, car.devices.secondaryPort = nil, nil
   car.devices.keyboardName, car.devices.keyboard = nil, nil
   car.devices.gpuName, car.devices.gpu = nil, nil
   if not peripheral or not peripheral.getNames then return end
@@ -699,8 +708,8 @@ function car.scanDevices(force)
     local kind = car.peripheralType(name)
     local device = peripheral.wrap(name)
     if device then
-      if not car.devices.port and (kind:find("tm_rsport", 1, true) or (car.hasMethod(name, "getSides") and type(device.setAnalogOutput) == "function")) then
-        car.devices.portName, car.devices.port = name, device
+      if kind:find("tm_rsport", 1, true) or (car.hasMethod(name, "getSides") and type(device.setAnalogOutput) == "function") then
+        portCandidates[#portCandidates + 1] = { name = name, device = device }
       end
       if not car.devices.keyboard and (kind:find("tm_keyboard", 1, true) or type(device.setFireNativeEvents) == "function") then
         car.devices.keyboardName, car.devices.keyboard = name, device
@@ -710,11 +719,21 @@ function car.scanDevices(force)
       end
     end
   end
+  table.sort(portCandidates, function(first, second) return first.name < second.name end)
+  if portCandidates[1] then
+    car.devices.portName, car.devices.port = portCandidates[1].name, portCandidates[1].device
+  end
+  if portCandidates[2] then
+    car.devices.secondaryPortName, car.devices.secondaryPort = portCandidates[2].name, portCandidates[2].device
+  end
   if car.devices.keyboard and car.devices.keyboard.setFireNativeEvents then
     pcall(car.devices.keyboard.setFireNativeEvents, true)
   end
   if force or previousPortName ~= car.devices.portName then
     car.outputCache.port = {}
+  end
+  if force or previousSecondaryPortName ~= car.devices.secondaryPortName then
+    car.outputCache.secondary = {}
   end
 end
 
@@ -775,20 +794,46 @@ function car.portOutput(side, enabled)
   return ok == true
 end
 
+function car.secondaryPortOutput(side, enabled)
+  local port = car.devices.secondaryPort
+  if not port then return false end
+  enabled = enabled and true or false
+  if car.outputCache.secondary[side] == enabled then return true end
+  local ok, err
+  if port.setAnalogOutput then
+    ok, err = pcall(port.setAnalogOutput, side, enabled and 15 or 0)
+  elseif port.setAnalogueOutput then
+    ok, err = pcall(port.setAnalogueOutput, side, enabled and 15 or 0)
+  elseif port.setOutput then
+    ok, err = pcall(port.setOutput, side, enabled and true or false)
+  end
+  if ok then
+    car.outputCache.secondary[side] = enabled
+  else
+    car.devices.error = tostring(err or "secondary port output failed")
+  end
+  return ok == true
+end
+
 function car.clearPortOutputs()
-  local port = car.devices.port
-  if not port then return end
+  local ports = { car.devices.port, car.devices.secondaryPort }
   local sides = { "up", "down", "north", "east", "south", "west" }
-  for i = 1, #sides do
-    if port.setAnalogOutput then
-      pcall(port.setAnalogOutput, sides[i], 0)
-    elseif port.setAnalogueOutput then
-      pcall(port.setAnalogueOutput, sides[i], 0)
-    elseif port.setOutput then
-      pcall(port.setOutput, sides[i], false)
+  for portIndex = 1, #ports do
+    local port = ports[portIndex]
+    if port then
+      for sideIndex = 1, #sides do
+        if port.setAnalogOutput then
+          pcall(port.setAnalogOutput, sides[sideIndex], 0)
+        elseif port.setAnalogueOutput then
+          pcall(port.setAnalogueOutput, sides[sideIndex], 0)
+        elseif port.setOutput then
+          pcall(port.setOutput, sides[sideIndex], false)
+        end
+      end
     end
   end
   car.outputCache.port = {}
+  car.outputCache.secondary = {}
 end
 
 function car.applyOutputs()
@@ -804,6 +849,10 @@ function car.applyOutputs()
   car.portOutput("right", (car.state.lighting == "right" or car.state.lighting == "hazard") and car.state.blink)
   car.portOutput("back", (car.state.lighting == "left" or car.state.lighting == "hazard") and car.state.blink)
   car.portOutput("bottom", car.state.lighting == "headlights")
+  car.secondaryPortOutput("north", car.state.aHeld and not car.state.dHeld)
+  car.secondaryPortOutput("east", car.state.dHeld and not car.state.aHeld)
+  car.secondaryPortOutput("up", car.state.suspension == "down")
+  car.secondaryPortOutput("down", car.state.suspension == "up" or car.state.suspension == "down")
 end
 
 function car.setLighting(mode)
@@ -821,13 +870,9 @@ function car.toggleIndicator(side)
 end
 
 function car.cyclePortHeading()
-  local current = 1
-  for i = 1, #car.headingOrder do
-    if car.headingOrder[i] == car.state.portHeading then current = i break end
-  end
   car.clearPortOutputs()
-  car.state.portHeading = car.headingOrder[(current % #car.headingOrder) + 1]
-  settings.portHeading = car.state.portHeading
+  car.state.portHeading = "east"
+  settings.portHeading = "east"
   saveUserSettings()
   car.applyOutputs()
 end
@@ -883,6 +928,7 @@ function car.setDriveMode(mode)
 end
 
 car.scanDevices(true)
+car.clearPortOutputs()
 car.engineOutput(ENGINE_SIDE, true)
 car.setDriveMode(car.driveMode)
 car.driveOutput(DRIVE_SIDE, false)
@@ -2561,6 +2607,8 @@ function car.drawHDHome(x, y, width, height)
   local speedScale = #speedText <= 2 and 4 or 3
   car.hdCenteredText(x, y + 42, speedW, speedText, car.palette.text, speedScale)
   car.hdCenteredText(x, y + 84, speedW, unit, car.palette.muted, 1)
+  local signalText = car.state.lighting == "left" and "LEFT" or (car.state.lighting == "right" and "RIGHT" or (car.state.lighting == "hazard" and "HAZARD" or ""))
+  if signalText ~= "" then car.hdCenteredText(x, y + 98, speedW, signalText, car.palette.yellow, 1) end
   local gear = car.state.reverse and "R" or (car.state.clutch and "D" or "P")
   car.hdCenteredText(x, y + height - 41, speedW, gear, car.state.reverse and car.palette.orange or car.palette.green, 3)
 
@@ -2584,10 +2632,10 @@ function car.drawHDHome(x, y, width, height)
   car.hdButton("control:boost", actionX + (controlW + controlsGap) * 2, secondY, thirdW, controlH, "SHOP", "BOOST", car.state.workshopBoost, car.palette.orange)
 
   local thirdY = y + (controlH + controlsGap) * 2
-  local signalText = car.state.lighting == "left" and "LEFT" or (car.state.lighting == "right" and "RIGHT" or (car.state.lighting == "hazard" and "HAZARD" or "OFF"))
-  car.hdButton(nil, actionX, thirdY, controlW, height - (thirdY - y), "GEAR", gear, car.state.reverse, car.palette.orange)
-  car.hdButton(nil, actionX + controlW + controlsGap, thirdY, controlW, height - (thirdY - y), "CLUTCH", car.state.clutch and "ACTIVE" or "OPEN", car.state.clutch, car.palette.green)
-  car.hdButton(nil, actionX + (controlW + controlsGap) * 2, thirdY, thirdW, height - (thirdY - y), "SIGNAL", signalText, car.state.lighting ~= "none" and car.state.lighting ~= "headlights", car.palette.yellow)
+  car.hdButton("control:suspension_up", actionX, thirdY, controlW, height - (thirdY - y), "/\\", "HEIGHT", car.state.suspension == "up", car.palette.green)
+  car.hdButton("control:suspension_down", actionX + controlW + controlsGap, thirdY, controlW, height - (thirdY - y), "\\/", "HEIGHT", car.state.suspension == "down", car.palette.orange)
+  local steering = car.state.aHeld and not car.state.dHeld and "LEFT" or (car.state.dHeld and not car.state.aHeld and "RIGHT" or "CENTER")
+  car.hdButton(nil, actionX + (controlW + controlsGap) * 2, thirdY, thirdW, height - (thirdY - y), "STEER", steering, steering ~= "CENTER", car.palette.blue)
 end
 
 function car.drawHDDrive(x, y, width, height)
@@ -2648,8 +2696,8 @@ function car.drawHDSettings(x, y, width, height)
   car.hdButton("setting:units", x, y, width, rowH, "SPEED UNITS", settings.units, true, car.palette.blue)
   car.hdButton("setting:smooth", x, y + rowH + gap, width, rowH, "SPEED FILTER", settings.smoothEnabled and "ON" or "OFF", settings.smoothEnabled, car.palette.green)
   car.hdButton("control:heading", x, y + (rowH + gap) * 2, width, rowH, "PORT HEADING", car.state.portHeading:upper(), true, car.palette.orange)
-  local status = (car.devices.keyboardName and "KEYBOARD READY" or "KEYBOARD MISSING") .. "  |  " .. (car.devices.portName and "REDSTONE READY" or "REDSTONE MISSING")
-  car.hdButton(nil, x, y + (rowH + gap) * 3, width, height - (rowH + gap) * 3, "HARDWARE", status, car.devices.keyboardName ~= nil and car.devices.portName ~= nil, car.palette.green)
+  local status = (car.devices.keyboardName and "KEYBOARD" or "NO KEYBOARD") .. "  |  " .. (car.devices.portName and "PORT 1" or "NO PORT 1") .. "  |  " .. (car.devices.secondaryPortName and "PORT 2" or "NO PORT 2")
+  car.hdButton(nil, x, y + (rowH + gap) * 3, width, height - (rowH + gap) * 3, "HARDWARE", status, car.devices.keyboardName ~= nil and car.devices.portName ~= nil and car.devices.secondaryPortName ~= nil, car.palette.green)
 end
 
 function car.drawHDAbout(x, y, width, height)
@@ -2676,7 +2724,7 @@ function car.drawHD()
   local modeLabel = car.state.mode == "sport_plus" and "SPORT+" or car.state.mode:upper()
   car.hdText(86, 8, modeLabel, car.state.mode == "standard" and car.palette.blue or car.palette.orange, 1)
   local timeText = os.date("%H:%M")
-  if width >= 360 then car.hdText(150, 8, "Z:L  C:R  X:HAZ", car.palette.muted, 1) end
+  if width >= 360 then car.hdText(145, 8, "A/D:STEER Z/C:SIG X:HAZ", car.palette.muted, 1) end
   car.hdText(width - car.hdTextWidth(timeText, 1) - 9, 8, timeText, car.palette.text, 1)
 
   local margin = 8
@@ -2785,6 +2833,10 @@ function car.handleDriveControl(id)
     car.state.workshopEngineOff = not car.state.workshopEngineOff
   elseif id == "boost" then
     car.state.workshopBoost = not car.state.workshopBoost
+  elseif id == "suspension_up" then
+    car.state.suspension = car.state.suspension == "up" and "neutral" or "up"
+  elseif id == "suspension_down" then
+    car.state.suspension = car.state.suspension == "down" and "neutral" or "down"
   elseif id == "headlights" then
     car.setLighting("headlights")
     return true
@@ -2993,6 +3045,10 @@ function car.handleKey(code, down, repeated)
     car.state.sHeld = down
     car.state.reverse = car.state.sHeld
     car.state.clutch = car.state.wHeld or car.state.sHeld or car.cruiseOn
+  elseif name == "a" then
+    car.state.aHeld = down
+  elseif name == "d" then
+    car.state.dHeld = down
   elseif fresh and name == "g" then
     car.state.frontDriveOff = not car.state.frontDriveOff
   elseif fresh and name == "f" then
@@ -3020,6 +3076,8 @@ end
 function car.releaseKeys()
   car.state.wHeld = false
   car.state.sHeld = false
+  car.state.aHeld = false
+  car.state.dHeld = false
   car.state.clutch = car.cruiseOn
   car.state.reverse = false
   car.applyOutputs()
@@ -3031,6 +3089,9 @@ function car.safeShutdown()
   car.state.reverse = false
   car.state.wHeld = false
   car.state.sHeld = false
+  car.state.aHeld = false
+  car.state.dHeld = false
+  car.state.suspension = "neutral"
   car.state.frontDriveOff = false
   car.state.workshopEngineOff = true
   car.state.driveEngineOff = true
