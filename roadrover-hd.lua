@@ -469,6 +469,16 @@ return function(car, context)
     return x, y
   end
 
+  function car.hdMouseToTermPoint(a, b, c, d)
+    if type(a) == "string" and type(b) == "number" and type(c) == "number" then
+      return car.hdToTermPoint(b, c)
+    end
+    if type(a) == "number" and type(b) == "number" and type(c) == "number" then
+      return car.hdToTermPoint(b, c)
+    end
+    return car.hdToTermPoint(a, b, c, d)
+  end
+
   function car.drawHDError(message)
     if not car.devices.gpu or not car.hd.width or not car.hd.height then return false end
     fillPixels(1, 1, car.hd.width, car.hd.height, 0xF0F0F0)
