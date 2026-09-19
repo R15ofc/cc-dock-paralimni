@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.7"
+local VERSION = _G.ROADROVER_VERSION or "2.7.8"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -192,6 +192,15 @@ local car = {
     recovery = { phase = nil, started = 0, attempts = 0, steer = 0 },
     overtake = { phase = nil, started = 0, side = 1, leadId = nil },
     history = {}
+  },
+  shipLoad = {
+    active = false,
+    chunks = 0,
+    shipId = nil,
+    error = nil,
+    lastRenew = -1e9,
+    renewInterval = 20,
+    leaseSeconds = 45
   },
   hd = {
     ready = false,
@@ -1202,8 +1211,8 @@ end
 
 function car.telemetryPort()
   local port = car.devices.port
-  if port and type(port.scanRoad) == "function" then return port, car.devices.portName end
-  if car.devices.portName and car.hasMethod(car.devices.portName, "scanRoad") then
+  if port and (type(port.getRoadMap) == "function" or type(port.scanRoad) == "function") then return port, car.devices.portName end
+  if car.devices.portName and (car.hasMethod(car.devices.portName, "getRoadMap") or car.hasMethod(car.devices.portName, "scanRoad")) then
     return port, car.devices.portName
   end
   if peripheral and type(peripheral.getNames) == "function" then
@@ -1211,10 +1220,14 @@ function car.telemetryPort()
     if ok and type(names) == "table" then
       for index = 1, #names do
         local wrapped = peripheral.wrap(names[index])
-        if wrapped and type(wrapped.scanRoad) == "function" then return wrapped, names[index] end
-        if car.hasMethod(names[index], "scanRoad") then return wrapped, names[index] end
+        if wrapped and (type(wrapped.getRoadMap) == "function" or type(wrapped.scanRoad) == "function") then return wrapped, names[index] end
+        if car.hasMethod(names[index], "getRoadMap") or car.hasMethod(names[index], "scanRoad") then return wrapped, names[index] end
       end
     end
+  end
+  local globalApi = rawget(_G, "tweaked_tweaks") or rawget(_G, "tweakedTweaks")
+  if type(globalApi) == "table" and type(globalApi.getRoadMap) == "function" then
+    return globalApi, "tweaked_tweaks"
   end
   return nil
 end
@@ -1371,6 +1384,12 @@ function car.ensureMapFallback()
 end
 
 function car.callTelemetry(method, ...)
+  local globalApi = rawget(_G, "tweaked_tweaks") or rawget(_G, "tweakedTweaks")
+  local globalFn = type(globalApi) == "table" and globalApi[method] or nil
+  if type(globalFn) == "function" then
+    local called, first, second, third = pcall(globalFn, ...)
+    if called then return true, first, "tweaked_tweaks", second, third end
+  end
   local port, portName = car.telemetryPort()
   if not port and not portName then return false, "Telemetry peripheral unavailable", nil end
   local directError = nil
@@ -1386,6 +1405,38 @@ function car.callTelemetry(method, ...)
   local called, first, second, third = pcall(fn, ...)
   if called then return true, first, portName, second, third end
   return false, directError or first, portName
+end
+
+function car.updateShipLoad(force)
+  local state = car.shipLoad
+  local now = os.clock()
+  if not force and now - state.lastRenew < state.renewInterval then return state.active end
+  state.lastRenew = now
+  local api = rawget(_G, "tweaked_tweaks") or rawget(_G, "tweakedTweaks")
+  if type(api) ~= "table" or type(api.requestShipLoad) ~= "function" then
+    state.active = false
+    state.error = "Tweaked Tweaks 1.6.1 required"
+    return false
+  end
+  local ok, result = pcall(api.requestShipLoad, state.leaseSeconds)
+  if ok and type(result) == "table" and result.available == true and result.active == true then
+    state.active = true
+    state.chunks = tonumber(result.chunks) or 0
+    state.shipId = result.shipId
+    state.error = nil
+    local renewAfter = tonumber(result.renewAfter)
+    if renewAfter then state.renewInterval = math.max(10, math.min(30, renewAfter)) end
+    return true
+  end
+  state.active = false
+  state.error = tostring(type(result) == "table" and result.error or result or "Ship loading unavailable")
+  return false
+end
+
+function car.releaseShipLoad()
+  local api = rawget(_G, "tweaked_tweaks") or rawget(_G, "tweakedTweaks")
+  if type(api) == "table" and type(api.releaseShipLoad) == "function" then pcall(api.releaseShipLoad) end
+  car.shipLoad.active = false
 end
 
 function car.writeMapDiagnostic(status, detail, portName)
@@ -4448,6 +4499,7 @@ end
 
 function car.updateHardware()
   car.scanDevices(false)
+  car.updateShipLoad(false)
   car.updateAutopilot()
   local selectedTab = tabs and tabs[activeTab] or nil
   if not car.autopilot.enabled and selectedTab and selectedTab.id == "map" then car.updateMap(false) end
@@ -4537,6 +4589,7 @@ function car.releaseKeys()
 end
 
 function car.safeShutdown()
+  car.releaseShipLoad()
   car.saveMapCache(nil, true)
   car.flushVehicleState(true)
   car.autopilot.enabled = false
@@ -4602,6 +4655,7 @@ end
 
 local function main()
   car.scanDevices(true)
+  car.updateShipLoad(true)
   if car.setupHD then car.setupHD(true) end
   rebuildUI()
   redraw()
