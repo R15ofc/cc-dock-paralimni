@@ -34,6 +34,7 @@ return function(car, context)
     offsetX = 1,
     offsetY = 1,
     lines = {},
+    renderedLines = {},
     dirty = true
   }
   local gpuTerminal
@@ -179,47 +180,53 @@ return function(car, context)
   end
 
   local function renderBuffer()
-    if not terminalState.dirty then return true end
+    if not terminalState.dirty then return true, false end
+    local changed = false
     for y = 1, terminalState.height do
       local line = terminalState.lines[y] or blankLine()
-      local pixelY = cellPixelY(y)
-      local start = 1
-      while start <= terminalState.width do
-        local bg = line[3]:sub(start, start)
-        local finish = start
-        while finish < terminalState.width and line[3]:sub(finish + 1, finish + 1) == bg do
-          finish = finish + 1
-        end
-        local pixelX = cellPixelX(start)
-        local pixelWidth = (finish - start + 1) * terminalState.cellWidth
-        if finish == terminalState.width then pixelWidth = car.hd.width - pixelX + 1 end
-        fillPixels(pixelX, pixelY, pixelWidth, terminalState.cellHeight, colorRGB(decodeBlitColor(bg, colors.black)))
-        start = finish + 1
-      end
-
-      start = 1
-      while start <= terminalState.width do
-        if line[1]:sub(start, start) == " " then
-          start = start + 1
-        else
-          local fg = line[2]:sub(start, start)
+      local previous = terminalState.renderedLines[y]
+      if not previous or previous[1] ~= line[1] or previous[2] ~= line[2] or previous[3] ~= line[3] then
+        changed = true
+        local pixelY = cellPixelY(y)
+        local start = 1
+        while start <= terminalState.width do
+          local bg = line[3]:sub(start, start)
           local finish = start
-          while finish < terminalState.width
-            and line[1]:sub(finish + 1, finish + 1) ~= " "
-            and line[2]:sub(finish + 1, finish + 1) == fg do
+          while finish < terminalState.width and line[3]:sub(finish + 1, finish + 1) == bg do
             finish = finish + 1
           end
-          local text = line[1]:sub(start, finish)
           local pixelX = cellPixelX(start)
           local pixelWidth = (finish - start + 1) * terminalState.cellWidth
           if finish == terminalState.width then pixelWidth = car.hd.width - pixelX + 1 end
-          drawTextPixels(pixelX, pixelY, text, colorRGB(decodeBlitColor(fg, colors.white)), pixelWidth)
+          fillPixels(pixelX, pixelY, pixelWidth, terminalState.cellHeight, colorRGB(decodeBlitColor(bg, colors.black)))
           start = finish + 1
         end
+
+        start = 1
+        while start <= terminalState.width do
+          if line[1]:sub(start, start) == " " then
+            start = start + 1
+          else
+            local fg = line[2]:sub(start, start)
+            local finish = start
+            while finish < terminalState.width
+              and line[1]:sub(finish + 1, finish + 1) ~= " "
+              and line[2]:sub(finish + 1, finish + 1) == fg do
+              finish = finish + 1
+            end
+            local text = line[1]:sub(start, finish)
+            local pixelX = cellPixelX(start)
+            local pixelWidth = (finish - start + 1) * terminalState.cellWidth
+            if finish == terminalState.width then pixelWidth = car.hd.width - pixelX + 1 end
+            drawTextPixels(pixelX, pixelY, text, colorRGB(decodeBlitColor(fg, colors.white)), pixelWidth)
+            start = finish + 1
+          end
+        end
+        terminalState.renderedLines[y] = { line[1], line[2], line[3] }
       end
     end
     terminalState.dirty = false
-    return car.hd.error == nil
+    return car.hd.error == nil, changed
   end
 
   local function makeTerminal()
@@ -416,6 +423,7 @@ return function(car, context)
     terminalState.offsetY = math.floor((car.hd.height - terminalState.height * terminalState.cellHeight) / 2) + 1
     terminalState.cursorX = 1
     terminalState.cursorY = 1
+    terminalState.renderedLines = {}
     car.hd.gpuName = car.devices.gpuName
     car.hd.ready = type(gpu.filledRectangle) == "function" and type(gpu.drawText) == "function" and type(gpu.sync) == "function"
     car.hd.error = car.hd.ready and nil or "GPU drawing methods missing"
@@ -432,7 +440,9 @@ return function(car, context)
   function car.flushHD()
     if not car.hd.ready or not car.devices.gpu then return false end
     car.hd.error = nil
-    if not renderBuffer() then return false end
+    local rendered, changed = renderBuffer()
+    if not rendered then return false end
+    if not changed then return true end
     local ok, err = pcall(car.devices.gpu.sync)
     if not ok then car.hd.error = tostring(err) end
     return ok

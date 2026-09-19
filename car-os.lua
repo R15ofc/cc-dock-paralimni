@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.6"
+local VERSION = _G.ROADROVER_VERSION or "2.7.7"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -154,6 +154,11 @@ local car = {
     lastScanX = nil,
     lastScanZ = nil,
     lastRoute = -1e9,
+    lastBusUpdate = -1e9,
+    refreshRequested = true,
+    feedback = nil,
+    feedbackUntil = -1e9,
+    memory = { cells = {}, count = 0, dirty = false },
     viewport = nil,
     boxes = {}
   },
@@ -353,28 +358,44 @@ local function resetStats()
 end
 
 local function readJson(path)
-  if not path or not fs.exists(path) then return nil end
-  local h = fs.open(path, "r")
-  if not h then return nil end
-  local raw = h.readAll() or ""
-  h.close()
-  if raw == "" then return nil end
-  if textutils and textutils.unserializeJSON then
-    local ok, t = pcall(function() return textutils.unserializeJSON(raw) end)
-    if ok and type(t) == "table" then return t end
+  if not path then return nil end
+  local function parse(candidate)
+    if not fs.exists(candidate) then return nil end
+    local h = fs.open(candidate, "r")
+    if not h then return nil end
+    local raw = h.readAll() or ""
+    h.close()
+    if raw == "" then return nil end
+    if textutils and textutils.unserializeJSON then
+      local ok, value = pcall(function() return textutils.unserializeJSON(raw) end)
+      if ok and type(value) == "table" then return value end
+    end
+    return nil
   end
-  return nil
+  return parse(path) or parse(path .. ".bak")
 end
 
 local function writeJson(path, data)
   if not path or not textutils or not textutils.serializeJSON then return false end
   local ok, raw = pcall(function() return textutils.serializeJSON(data) end)
   if not ok or type(raw) ~= "string" then return false end
-  local h = fs.open(path, "w")
+  local temporary = path .. ".tmp"
+  local backup = path .. ".bak"
+  if fs.exists(temporary) then fs.delete(temporary) end
+  if fs.exists(backup) then fs.delete(backup) end
+  local h = fs.open(temporary, "w")
   if not h then return false end
   h.write(raw)
   h.close()
-  return true
+  if fs.exists(path) then fs.move(path, backup) end
+  local moved = pcall(fs.move, temporary, path)
+  if not moved then
+    if fs.exists(temporary) then fs.delete(temporary) end
+    if fs.exists(backup) then fs.move(backup, path) end
+    return false
+  end
+  if fs.exists(backup) then fs.delete(backup) end
+  return fs.exists(path)
 end
 
 local function settingsPath()
@@ -413,6 +434,9 @@ function car.saveVehicleState()
     data.destinationX = tonumber(car.map.destination.x)
     data.destinationZ = tonumber(car.map.destination.z)
   end
+  data.mapZoomIndex = car.map.zoomIndex
+  data.mapPanX = car.map.panX
+  data.mapPanZ = car.map.panZ
   local saved = writeJson(path, data)
   if saved then
     car.vehicleStateDirty = false
@@ -453,6 +477,10 @@ function car.loadVehicleState()
   else
     car.map.destination = nil
   end
+  car.map.zoomIndex = clamp(math.floor(tonumber(data.mapZoomIndex) or car.map.zoomIndex), 1, #car.map.zooms)
+  car.map.panX = tonumber(data.mapPanX) or 0
+  car.map.panZ = tonumber(data.mapPanZ) or 0
+  car.map.refreshRequested = true
   car.map.route = nil
   car.vehicleStateDirty = false
   return true
@@ -1141,12 +1169,13 @@ function car.tableNumber(value, key)
 end
 
 function car.vehicleWorldPosition()
+  if type(curPos) == "table" and tonumber(curPos.x) and tonumber(curPos.z) then return curPos end
   local center = car.map.scan and car.map.scan.center
   local x = car.tableNumber(center, "x")
   local y = car.tableNumber(center, "y")
   local z = car.tableNumber(center, "z")
   if x and z then return { x = x, y = y or 0, z = z } end
-  return curPos
+  return nil
 end
 
 function car.shipHeading()
@@ -1190,33 +1219,143 @@ function car.telemetryPort()
   return nil
 end
 
-function car.loadMapCache()
-  if car.map.cacheLoaded then return car.map.view ~= nil end
-  car.map.cacheLoaded = true
-  local cached = readJson(MAP_CACHE_PATH)
-  if type(cached) ~= "table" or cached.available ~= true or type(cached.samples) ~= "table" then return false end
-  car.map.view = cached
-  car.map.notice = "CACHED MAP"
+function car.mapCellKey(x, z)
+  return tostring(math.floor(tonumber(x) or 0)) .. ":" .. tostring(math.floor(tonumber(z) or 0))
+end
+
+function car.mapSamplePriority(sample)
+  local kind = tostring(type(sample) == "table" and sample.kind or "")
+  if kind == "crosswalk_marker" then return 5 end
+  if kind == "crosswalk" then return 4 end
+  if kind == "road" then return 3 end
+  if kind == "sidewalk" then return 2 end
+  return 1
+end
+
+function car.mergeMapView(view)
+  if type(view) ~= "table" or type(view.samples) ~= "table" then return false end
+  local center = view.center or {}
+  local centerX = tonumber(center.x)
+  local centerZ = tonumber(center.z)
+  if not centerX or not centerZ then return false end
+  local memory = car.map.memory
+  local changed = false
+  for _, sample in pairs(view.samples) do
+    if type(sample) == "table" then
+      local x = math.floor(centerX + (tonumber(sample.x) or 0) + 0.5)
+      local z = math.floor(centerZ + (tonumber(sample.z) or 0) + 0.5)
+      local key = car.mapCellKey(x, z)
+      local current = memory.cells[key]
+      if current or memory.count < 16000 then
+        local nextCell = {
+          x = x,
+          y = tonumber(sample.y) or tonumber(center.y) or 0,
+          z = z,
+          flags = tonumber(sample.flags) or 0,
+          kind = tostring(sample.kind or "road"),
+          tunnel = sample.tunnel == true
+        }
+        if not current then memory.count = memory.count + 1 end
+        if not current or current.flags ~= nextCell.flags or current.kind ~= nextCell.kind
+          or current.tunnel ~= nextCell.tunnel or current.y ~= nextCell.y then
+          memory.cells[key] = nextCell
+          changed = true
+        end
+      end
+    end
+  end
+  if changed then memory.dirty = true end
+  return changed
+end
+
+function car.buildMapView(position)
+  position = position or curPos or (car.map.view and car.map.view.vehicle) or (car.map.scan and car.map.scan.center)
+  if type(position) ~= "table" then return false end
+  local vehicleX = tonumber(position.x)
+  local vehicleY = tonumber(position.y) or 0
+  local vehicleZ = tonumber(position.z)
+  if not vehicleX or not vehicleZ then return false end
+  local centerX = vehicleX + (tonumber(car.map.panX) or 0)
+  local centerZ = vehicleZ + (tonumber(car.map.panZ) or 0)
+  local radius = car.map.zooms[car.map.zoomIndex] or 32
+  local step = radius <= 32 and 1 or (radius <= 64 and 2 or (radius <= 128 and 4 or 8))
+  local buckets = {}
+  for _, cell in pairs(car.map.memory.cells) do
+    local dx = (tonumber(cell.x) or 0) - centerX
+    local dz = (tonumber(cell.z) or 0) - centerZ
+    if math.abs(dx) <= radius and math.abs(dz) <= radius then
+      local bucketX = math.floor(dx / step)
+      local bucketZ = math.floor(dz / step)
+      local key = tostring(bucketX) .. ":" .. tostring(bucketZ)
+      local current = buckets[key]
+      if not current or car.mapSamplePriority(cell) > car.mapSamplePriority(current) then buckets[key] = cell end
+    end
+  end
+  local samples = {}
+  for _, cell in pairs(buckets) do
+    if #samples >= 2048 then break end
+    samples[#samples + 1] = {
+      x = (tonumber(cell.x) or centerX) - centerX,
+      y = tonumber(cell.y) or vehicleY,
+      z = (tonumber(cell.z) or centerZ) - centerZ,
+      flags = tonumber(cell.flags) or 0,
+      kind = cell.kind,
+      tunnel = cell.tunnel == true,
+      step = step
+    }
+  end
+  car.map.view = {
+    available = true,
+    center = { x = centerX, y = vehicleY, z = centerZ },
+    vehicle = { x = vehicleX, y = vehicleY, z = vehicleZ },
+    radius = radius,
+    step = step,
+    sharedCells = car.map.memory.count,
+    samples = samples
+  }
   return true
 end
 
-function car.saveMapCache(view)
-  if type(view) ~= "table" or view.available ~= true or type(view.samples) ~= "table" then return false end
-  local center = view.center or {}
-  local signature = table.concat({
-    tostring(math.floor(tonumber(center.x) or 0)),
-    tostring(math.floor(tonumber(center.z) or 0)),
-    tostring(view.radius or ""),
-    tostring(view.step or ""),
-    tostring(view.sharedCells or ""),
-    tostring(#view.samples)
-  }, ":")
+function car.loadMapCache()
+  if car.map.cacheLoaded then return car.map.memory.count > 0 end
+  car.map.cacheLoaded = true
+  local cached = readJson(MAP_CACHE_PATH)
+  if type(cached) ~= "table" then return false end
+  if tonumber(cached.format) == 2 and type(cached.cells) == "table" then
+    for _, cell in pairs(cached.cells) do
+      if type(cell) == "table" and tonumber(cell.x) and tonumber(cell.z) and car.map.memory.count < 16000 then
+        local key = car.mapCellKey(cell.x, cell.z)
+        if not car.map.memory.cells[key] then car.map.memory.count = car.map.memory.count + 1 end
+        car.map.memory.cells[key] = cell
+      end
+    end
+  elseif cached.available == true and type(cached.samples) == "table" then
+    car.mergeMapView(cached)
+  end
+  car.map.memory.dirty = false
+  if car.map.memory.count > 0 then
+    car.map.notice = "SAVED MAP"
+    car.buildMapView(curPos or cached.vehicle or cached.center)
+    return true
+  end
+  return false
+end
+
+function car.saveMapCache(view, force)
+  if type(view) == "table" then car.mergeMapView(view) end
+  local memory = car.map.memory
+  if memory.count < 1 then return false end
   local now = os.clock()
-  if signature == car.map.cacheSignature or now - car.map.lastCacheSave < 20 then return false end
-  car.map.cacheSignature = signature
-  car.map.lastCacheSave = now
+  if not force and (not memory.dirty or now - car.map.lastCacheSave < 5) then return false end
+  local cells = {}
+  for _, cell in pairs(memory.cells) do cells[#cells + 1] = cell end
   mkdirp(fs.getDir(MAP_CACHE_PATH))
-  return writeJson(MAP_CACHE_PATH, view)
+  local saved = writeJson(MAP_CACHE_PATH, { format = 2, cells = cells })
+  if saved then
+    memory.dirty = false
+    car.map.lastCacheSave = now
+  end
+  return saved
 end
 
 function car.ensureMapFallback()
@@ -1228,16 +1367,7 @@ function car.ensureMapFallback()
   local y = tonumber(position.y) or 0
   local z = tonumber(position.z)
   if not x or not z then return false end
-  car.map.view = {
-    available = true,
-    center = { x = x, y = y, z = z },
-    vehicle = { x = x, y = y, z = z },
-    radius = car.map.zooms[car.map.zoomIndex] or 32,
-    step = 1,
-    sharedCells = 0,
-    samples = {}
-  }
-  return true
+  return car.buildMapView({ x = x, y = y, z = z })
 end
 
 function car.callTelemetry(method, ...)
@@ -1316,6 +1446,11 @@ function car.routePoints()
   return route.points
 end
 
+function car.setMapFeedback(message, seconds)
+  car.map.feedback = tostring(message or "")
+  car.map.feedbackUntil = os.clock() + (tonumber(seconds) or 3)
+end
+
 function car.updateRoute(force, avoid)
   local destination = car.map.destination
   if not destination then
@@ -1323,10 +1458,19 @@ function car.updateRoute(force, avoid)
     return false
   end
   local now = os.clock()
-  if not force and now - car.map.lastRoute < 3 then return car.routePoints() ~= nil end
+  if not force and now - car.map.lastRoute < 8 then return car.routePoints() ~= nil end
   car.map.lastRoute = now
   local ok, route
-  if type(avoid) == "table" and tonumber(avoid.x) and tonumber(avoid.z) then
+  local position = curPos or car.vehicleWorldPosition()
+  local port, portName = car.telemetryPort()
+  local hasRouteFrom = type(position) == "table" and tonumber(position.x) and tonumber(position.y) and tonumber(position.z)
+    and ((port and type(port.planRoadRouteFrom) == "function") or (portName and car.hasMethod(portName, "planRoadRouteFrom")))
+  if hasRouteFrom and type(avoid) == "table" and tonumber(avoid.x) and tonumber(avoid.z) then
+    ok, route = car.callTelemetry("planRoadRouteFrom", position.x, position.y, position.z,
+      destination.x, destination.z, avoid.x, avoid.z, tonumber(avoid.radius) or 6)
+  elseif hasRouteFrom then
+    ok, route = car.callTelemetry("planRoadRouteFrom", position.x, position.y, position.z, destination.x, destination.z)
+  elseif type(avoid) == "table" and tonumber(avoid.x) and tonumber(avoid.z) then
     ok, route = car.callTelemetry("planRoadRoute", destination.x, destination.z, avoid.x, avoid.z, tonumber(avoid.radius) or 6)
   else
     ok, route = car.callTelemetry("planRoadRoute", destination.x, destination.z)
@@ -1335,14 +1479,17 @@ function car.updateRoute(force, avoid)
     if route.available == true then
       car.map.route = route
       car.map.error = nil
+      car.setMapFeedback("ROUTE READY - PRESS START", 4)
       return true
     end
     if not (type(avoid) == "table" and car.routePoints()) then car.map.route = route end
     car.map.error = tostring(route.error or "Route unavailable")
+    car.setMapFeedback(car.map.error, 5)
     return false
   end
   car.map.route = nil
   car.map.error = tostring(route or "Route request failed")
+  car.setMapFeedback(car.map.error, 5)
   return false
 end
 
@@ -1366,39 +1513,24 @@ function car.updateMap(force)
   end
   car.map.portName = portName
   local now = os.clock()
-  local scanInterval = car.autopilot.enabled and 2.5 or 6
-  if not force and now - car.map.lastUpdate < scanInterval then return true end
-  if not force and car.map.view and curPos and car.map.lastScanX and car.map.lastScanZ then
-    local dx = (tonumber(curPos.x) or car.map.lastScanX) - car.map.lastScanX
-    local dz = (tonumber(curPos.z) or car.map.lastScanZ) - car.map.lastScanZ
-    if dx * dx + dz * dz < 4 and now - car.map.lastScanAt < 30 then
-      car.map.lastUpdate = now
-      return true
-    end
-  end
+  local updateInterval = car.autopilot.enabled and 2.5 or 15
+  if not force and not car.map.refreshRequested and now - car.map.lastUpdate < updateInterval then return true end
   car.map.lastUpdate = now
+  car.map.refreshRequested = false
   if not car.map.serverVersion then
     local infoOK, info = car.callTelemetry("getTweakedTweaksInfo")
     if infoOK and type(info) == "table" then car.map.serverVersion = tostring(info.version or "") end
   end
-  local scanOK, scan, scanPortName = car.callTelemetry("scanRoad", 24)
-  if not scanOK or type(scan) ~= "table" or scan.available ~= true then
-    local rawError = tostring((type(scan) == "table" and scan.error) or scan or "Road scan failed")
-    car.map.errorDetail = rawError
-    if rawError:find("ClientLevel", 1, true) and rawError:find("DEDICATED_SERVER", 1, true) then
-      local version = car.map.serverVersion and car.map.serverVersion ~= "" and car.map.serverVersion or "old"
-      car.map.error = "SERVER MOD " .. version .. " MUST BE UPDATED"
-    else
-      car.map.error = "ROAD SONAR ERROR - SEE LOG"
-    end
-    car.map.notice = nil
-    car.writeMapDiagnostic("scan-failed", rawError, scanPortName or portName)
+  car.loadMapCache()
+  local vehicle = curPos or car.vehicleWorldPosition()
+  if type(vehicle) ~= "table" or not tonumber(vehicle.x) or not tonumber(vehicle.z) then
+    car.map.error = "VEHICLE POSITION UNAVAILABLE"
+    car.map.errorDetail = car.map.error
     return car.ensureMapFallback()
   end
-  car.map.scan = scan
-  local vehicle = scan.center or {}
-  local vehicleX = tonumber(vehicle.x) or 0
-  local vehicleZ = tonumber(vehicle.z) or 0
+  local vehicleX = tonumber(vehicle.x)
+  local vehicleY = tonumber(vehicle.y) or 0
+  local vehicleZ = tonumber(vehicle.z)
   car.map.lastScanAt = now
   car.map.lastScanX = vehicleX
   car.map.lastScanZ = vehicleZ
@@ -1406,35 +1538,38 @@ function car.updateMap(force)
   local centerZ = vehicleZ + car.map.panZ
   local radius = car.map.zooms[car.map.zoomIndex] or 32
   local step = radius <= 32 and 1 or (radius <= 64 and 2 or (radius <= 128 and 4 or 8))
-  car.map.view = {
-    available = true,
-    center = { x = vehicleX, y = tonumber(vehicle.y) or 0, z = vehicleZ },
-    vehicle = { x = vehicleX, y = tonumber(vehicle.y) or 0, z = vehicleZ },
-    radius = tonumber(scan.radius) or 24,
-    step = 1,
-    sharedCells = tonumber(scan.sharedCells) or 0,
-    samples = type(scan.samples) == "table" and scan.samples or {}
-  }
-  car.map.error = nil
-  car.map.errorDetail = nil
-  if scan.seedFound == false then
-    car.map.notice = "NO CONNECTED ROAD NEAR VEHICLE"
-  elseif scan.budgetLimited == true then
-    car.map.notice = "ROAD SONAR RANGE LIMITED"
-  else
-    car.map.notice = "ROAD SONAR"
+  if not ((port and type(port.getRoadMap) == "function") or (portName and car.hasMethod(portName, "getRoadMap"))) then
+    car.map.error = "SERVER MAP API UNAVAILABLE"
+    car.map.errorDetail = car.map.error
+    return car.ensureMapFallback()
   end
-  if (port and type(port.getRoadMap) == "function") or (portName and car.hasMethod(portName, "getRoadMap")) then
-    local viewOK, view = car.callTelemetry("getRoadMap", centerX, centerZ, radius, step)
-    if viewOK and type(view) == "table" and view.available == true then
-      car.map.view = view
-      if scan.seedFound ~= false and scan.budgetLimited ~= true then car.map.notice = nil end
+  local viewOK, view, mapPortName = car.callTelemetry("getRoadMap", centerX, centerZ, radius, step,
+    vehicleX, vehicleY, vehicleZ)
+  if viewOK and type(view) == "table" and view.available == true then
+    car.mergeMapView(view)
+    local sharedCells = tonumber(view.sharedCells) or 0
+    car.map.scan = { center = { x = vehicleX, y = vehicleY, z = vehicleZ }, sharedCells = sharedCells }
+    car.map.error = nil
+    car.map.errorDetail = nil
+    if sharedCells < 1 and car.map.memory.count < 1 then
+      car.map.notice = "MAP DATA NOT IMPORTED"
+    elseif sharedCells < 1 then
+      car.map.notice = "USING SAVED LOCAL MAP"
     else
-      car.map.notice = "LOCAL SCAN - SHARED MAP UNAVAILABLE"
+      car.map.notice = nil
     end
+  else
+    local rawError = tostring((type(view) == "table" and view.error) or view or "Map request failed")
+    car.map.error = "MAP SERVICE UNAVAILABLE"
+    car.map.errorDetail = rawError
+    car.writeMapDiagnostic("map-failed", rawError, mapPortName or portName)
+    return car.ensureMapFallback()
   end
-  car.saveMapCache(car.map.view)
-  if (port and type(port.readBus) == "function") or (portName and car.hasMethod(portName, "readBus")) then
+  car.buildMapView(vehicle)
+  car.saveMapCache(nil, false)
+  if car.autopilot.enabled and now - car.map.lastBusUpdate >= 5
+    and ((port and type(port.readBus) == "function") or (portName and car.hasMethod(portName, "readBus"))) then
+    car.map.lastBusUpdate = now
     local telemetryOK, telemetry = car.callTelemetry("readBus")
     if telemetryOK and type(telemetry) == "table" then car.map.telemetry = telemetry end
   end
@@ -1444,12 +1579,12 @@ function car.updateMap(force)
   end
   car.writeMapDiagnostic(
     "ready",
-    "samples=" .. tostring(type(scan.samples) == "table" and #scan.samples or 0)
-      .. " sharedCells=" .. tostring(scan.sharedCells or 0)
-      .. " loaded=" .. tostring(scan.loaded),
-    scanPortName or portName
+    "samples=" .. tostring(type(view.samples) == "table" and #view.samples or 0)
+      .. " sharedCells=" .. tostring(view.sharedCells or 0)
+      .. " source=offline-region-map",
+    mapPortName or portName
   )
-  if car.map.destination then car.updateRoute(force) end
+  if car.map.destination and (car.autopilot.enabled or force) then car.updateRoute(force) end
   return car.map.view ~= nil
 end
 
@@ -1566,30 +1701,38 @@ function car.aiRouteGeometry(position, points)
 end
 
 function car.aiUpdatePerception(position, heading, target)
-  local port = car.telemetryPort()
-  if not port then return end
+  local port, portName = car.telemetryPort()
+  if not port and not portName then return end
   local now = os.clock()
-  if now - car.ai.lastPerception >= 0.45 then
+  local positionArgs = type(position) == "table" and tonumber(position.x) and tonumber(position.y) and tonumber(position.z)
+  if now - car.ai.lastPerception >= 1.25 then
     car.ai.lastPerception = now
-    if type(port.scanProtectedTraffic) == "function" then
-      local ok, value = pcall(port.scanProtectedTraffic, 80)
+    if (port and type(port.scanProtectedTraffic) == "function") or (portName and car.hasMethod(portName, "scanProtectedTraffic")) then
+      local ok, value
+      if positionArgs then ok, value = car.callTelemetry("scanProtectedTraffic", 48, position.x, position.y, position.z)
+      else ok, value = car.callTelemetry("scanProtectedTraffic", 48) end
       if ok and type(value) == "table" and value.available == true then car.ai.perception.traffic = value end
     end
-    if type(port.scanShips) == "function" then
-      local ok, value = pcall(port.scanShips, 160)
+    if (port and type(port.scanShips) == "function") or (portName and car.hasMethod(portName, "scanShips")) then
+      local ok, value
+      if positionArgs then ok, value = car.callTelemetry("scanShips", 96, position.x, position.y, position.z)
+      else ok, value = car.callTelemetry("scanShips", 96) end
       if ok and type(value) == "table" and value.available == true then car.ai.perception.ships = value end
     end
-    if type(port.getFleetVehicles) == "function" then
-      local ok, value = pcall(port.getFleetVehicles, 192)
+    if (port and type(port.getFleetVehicles) == "function") or (portName and car.hasMethod(portName, "getFleetVehicles")) then
+      local ok, value
+      if positionArgs then ok, value = car.callTelemetry("getFleetVehicles", 128, position.x, position.y, position.z)
+      else ok, value = car.callTelemetry("getFleetVehicles", 128) end
       if ok and type(value) == "table" and value.available == true then car.ai.perception.fleet = value end
     end
   end
-  if now - car.ai.lastPublish >= 0.35 and type(port.publishFleetState) == "function" then
+  if now - car.ai.lastPublish >= 1
+    and ((port and type(port.publishFleetState) == "function") or (portName and car.hasMethod(portName, "publishFleetState"))) then
     car.ai.lastPublish = now
     local destination = car.map.destination or position
     local waypoint = target or destination
-    local ok, value = pcall(
-      port.publishFleetState,
+    local ok, value = car.callTelemetry(
+      "publishFleetState",
       car.autopilot.enabled,
       heading or 0,
       car.autopilot.targetSpeed or 0,
@@ -1597,7 +1740,10 @@ function car.aiUpdatePerception(position, heading, target)
       destination.z or position.z,
       waypoint.x or position.x,
       waypoint.z or position.z,
-      car.autopilot.behavior or "manual"
+      car.autopilot.behavior or "manual",
+      position.x or 0,
+      position.y or 0,
+      position.z or 0
     )
     if ok and type(value) == "table" and value.available == true then car.ai.ownShipId = tonumber(value.shipId) end
   end
@@ -1843,13 +1989,27 @@ function car.stopAutopilot(reason)
   car.state.reverse = car.state.reverseSelected
   car.state.clutch = car.cruiseOn
   car.applyOutputs()
+  if reason and reason ~= "OFF" then car.setMapFeedback("AUTOPILOT " .. tostring(reason), 4) end
 end
 
 function car.setAutopilot(enabled)
   if not enabled then car.stopAutopilot("OFF"); return true end
-  if not car.map.destination then car.autopilot.status = "SET DESTINATION"; return false end
+  if not car.map.destination then
+    car.autopilot.status = "SET DESTINATION"
+    car.setMapFeedback("TAP THE ROAD, THEN PRESS START", 5)
+    return false
+  end
+  if car.state.driveEngineOff then
+    car.autopilot.status = "ENGINE OFF"
+    car.setMapFeedback("TURN ON DRIVE ENGINE FIRST", 5)
+    return false
+  end
   car.updateMap(true)
-  if not car.updateRoute(true) then car.autopilot.status = "ROUTE UNAVAILABLE"; return false end
+  if not car.routePoints() and not car.updateRoute(true) then
+    car.autopilot.status = "ROUTE UNAVAILABLE"
+    car.setMapFeedback("ROUTE UNAVAILABLE - IMPORT REGION MAP", 6)
+    return false
+  end
   car.cruiseOn = false
   car.state.reverseSelected = false
   car.state.reverse = false
@@ -1865,6 +2025,7 @@ function car.setAutopilot(enabled)
   car.ai.recovery.attempts = 0
   car.ai.overtake.phase = nil
   car.markVehicleStateDirty()
+  car.setMapFeedback("AUTOPILOT ACTIVE", 4)
   return true
 end
 
@@ -1887,16 +2048,6 @@ function car.updateAutopilot()
   local distanceToDestination = destination and math.sqrt((destination.x - position.x) ^ 2 + (destination.z - position.z) ^ 2) or math.huge
   if distanceToDestination <= 3 then car.stopAutopilot("ARRIVED"); return end
   car.aiUpdateDynamics(now, distanceToDestination)
-
-  local confidence = tonumber(car.map.scan and car.map.scan.confidence) or 0
-  if confidence < 0.12 then
-    car.autopilot.status = "ROAD LOST"
-    car.state.clutch = false
-    car.state.aHeld = false
-    car.state.dHeld = false
-    car.applyOutputs()
-    return
-  end
 
   local geometry = car.aiRouteGeometry(position, points)
   local target = geometry and geometry.target
@@ -3607,26 +3758,31 @@ function car.drawMap(y0)
   settingsBoxes = {}
   car.driveBoxes = {}
   car.map.boxes = {}
-  car.updateMap(false)
 
   local view = car.map.view
   local scan = car.map.scan
-  local status = car.map.error or car.map.notice
+  local now = os.clock()
+  local feedbackActive = car.map.feedback and car.map.feedback ~= "" and now <= car.map.feedbackUntil
+  local status = feedbackActive and car.map.feedback or car.map.error
   if not status and car.autopilot.enabled then
     status = "AI " .. tostring(car.autopilot.status) .. "  " .. tostring(car.autopilot.selectedMode):upper()
       .. "  " .. fmt(car.autopilot.targetSpeed, 1) .. " b/s  STOP " .. fmt(car.autopilot.stoppingDistance, 1)
   elseif not status and car.map.destination then
-    status = "Destination " .. math.floor(car.map.destination.x) .. ", " .. math.floor(car.map.destination.z)
+    status = "DEST " .. math.floor(car.map.destination.x) .. "," .. math.floor(car.map.destination.z) .. "  PRESS START"
+  elseif not status and car.map.notice then
+    status = car.map.notice
   elseif not status then
-    status = "Tap map to set destination"
+    status = "1 TAP ROAD  2 PRESS START"
   end
-  writeAt(centerWin, 2, y0, trim(status, math.max(1, layout.centerW - 2)), car.map.error and colors.red or COLORS.fg, COLORS.bg)
+  local statusError = car.map.error and not feedbackActive
+  writeAt(centerWin, 2, y0, trim(status, math.max(1, layout.centerW - 2)), statusError and colors.red or COLORS.fg, COLORS.bg)
 
   local mapX1 = 2
   local mapY1 = y0 + 1
   local mapX2 = math.max(mapX1, layout.centerW - 1)
-  local controlsY = layout.h
-  local mapY2 = math.max(mapY1, controlsY - 2)
+  local controlsY1 = math.max(mapY1 + 1, layout.h - 1)
+  local controlsY2 = layout.h
+  local mapY2 = math.max(mapY1, controlsY1 - 1)
   fillRect(centerWin, mapX1, mapY1, mapX2 - mapX1 + 1, mapY2 - mapY1 + 1, colors.lightGray)
 
   if type(view) == "table" then
@@ -3705,7 +3861,16 @@ function car.drawMap(y0)
     local vehicle = view.vehicle or (scan and scan.center)
     if type(vehicle) == "table" then
       local vx, vy = car.mapProject(tonumber(vehicle.x) or 0, tonumber(vehicle.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-      if vx and vy then writeAt(centerWin, vx, vy, "^", colors.black, colors.lime) end
+      if vx and vy then
+        local marker = "^"
+        local heading = car.shipHeading()
+        if heading then
+          local directionX, directionZ = math.cos(heading), math.sin(heading)
+          if math.abs(directionX) >= math.abs(directionZ) then marker = directionX >= 0 and ">" or "<"
+          else marker = directionZ >= 0 and "v" or "^" end
+        end
+        writeAt(centerWin, vx, vy, marker, colors.black, colors.lime)
+      end
     end
   else
     car.map.viewport = nil
@@ -3724,27 +3889,39 @@ function car.drawMap(y0)
     end
   end
 
-  local controls = {
-    { "zoom_out", "-" }, { "zoom_in", "+" }, { "pan_left", "<" }, { "pan_right", ">" },
-    { "pan_up", "^" }, { "pan_down", "v" }, { "recenter", "C" }, { "autopilot", car.autopilot.enabled and "STOP" or "AUTO" }
-  }
-  local gap = 1
-  local available = layout.centerW - 2
-  local buttonW = math.max(1, math.floor((available - gap * (#controls - 1)) / #controls))
-  local x = 2
-  for index = 1, #controls do
-    local control = controls[index]
-    local width = index == #controls and math.max(1, layout.centerW - x) or buttonW
-    local active = control[1] == "autopilot" and car.autopilot.enabled
-    local bg = active and colors.lime or COLORS.panel
-    writeAt(centerWin, x, controlsY, trim(control[2], width), bestFg(bg), bg)
-    car.map.boxes[control[1]] = {
-      x1 = layout.centerX + x - 1, y1 = controlsY,
-      x2 = layout.centerX + x + width - 2, y2 = controlsY
-    }
-    x = x + width + gap
-    if x > layout.centerW then break end
+  local function drawControlRow(controls, row)
+    local gap = 1
+    local available = math.max(1, layout.centerW - 2)
+    local buttonW = math.max(1, math.floor((available - gap * (#controls - 1)) / #controls))
+    local x = 2
+    for index = 1, #controls do
+      local control = controls[index]
+      local width = index == #controls and math.max(1, layout.centerW - x) or buttonW
+      local active = control[1] == "autopilot" and car.autopilot.enabled
+      local bg = active and colors.lime or COLORS.panel
+      local label = trim(control[2], width)
+      local textX = x + math.max(0, math.floor((width - #label) / 2))
+      fillRect(centerWin, x, row, width, 1, bg)
+      writeAt(centerWin, textX, row, label, bestFg(bg), bg)
+      if control[1] then
+        car.map.boxes[control[1]] = {
+          x1 = layout.centerX + x - 1, y1 = row,
+          x2 = layout.centerX + x + width - 2, y2 = row
+        }
+      end
+      x = x + width + gap
+      if x > layout.centerW then break end
+    end
   end
+
+  local radiusLabel = "R" .. tostring(car.map.zooms[car.map.zoomIndex] or 32)
+  drawControlRow({
+    { "zoom_out", "ZOOM -" }, { nil, radiusLabel }, { "zoom_in", "ZOOM +" }, { "recenter", "CENTER" }
+  }, controlsY1)
+  drawControlRow({
+    { "pan_left", "<" }, { "pan_up", "^" }, { "pan_down", "v" }, { "pan_right", ">" },
+    { "autopilot", car.autopilot.enabled and "STOP" or "START" }
+  }, controlsY2)
 end
 
 local function drawComingSoon(y0)
@@ -4051,9 +4228,12 @@ local function handleClick(mx, my)
         car.map.panZ = 0
       elseif id == "autopilot" then
         car.setAutopilot(not car.autopilot.enabled)
+        return true
       end
       car.map.lastUpdate = -1e9
-      car.updateMap(true)
+      car.map.refreshRequested = true
+      car.buildMapView(curPos)
+      car.markVehicleStateDirty()
       return true
     end
   end
@@ -4066,7 +4246,8 @@ local function handleClick(mx, my)
     local worldZ = viewport.centerZ + ((my - viewport.y1) / height * 2 - 1) * viewport.radius
     car.map.destination = { x = math.floor(worldX + 0.5), z = math.floor(worldZ + 0.5) }
     car.map.lastRoute = -1e9
-    car.updateRoute(true)
+    car.map.route = nil
+    car.setMapFeedback("DESTINATION SET - PRESS START", 6)
     car.markVehicleStateDirty()
     return true
   end
@@ -4268,6 +4449,8 @@ end
 function car.updateHardware()
   car.scanDevices(false)
   car.updateAutopilot()
+  local selectedTab = tabs and tabs[activeTab] or nil
+  if not car.autopilot.enabled and selectedTab and selectedTab.id == "map" then car.updateMap(false) end
   local now = os.clock()
   if car.pointer.down and now - car.pointer.lastSeen > 0.8 then
     car.pointer.down = false
@@ -4354,6 +4537,8 @@ function car.releaseKeys()
 end
 
 function car.safeShutdown()
+  car.saveMapCache(nil, true)
+  car.flushVehicleState(true)
   car.autopilot.enabled = false
   car.autopilot.status = "OFF"
   car.state.mode = "standard"
