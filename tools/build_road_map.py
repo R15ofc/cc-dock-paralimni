@@ -122,6 +122,74 @@ def expanded(points, radius):
     return result
 
 
+def wide_surface(points, core_radius=2, restore_radius=7):
+    """Keep surfaces which contain a road-width core, rejecting narrow rails."""
+    if not points:
+        return set(), 0
+    core_offsets = [
+        (dx, dz)
+        for dx in range(-core_radius, core_radius + 1)
+        for dz in range(-core_radius, core_radius + 1)
+    ]
+    core = {
+        (x, z)
+        for x, z in points
+        if all((x + dx, z + dz) in points for dx, dz in core_offsets)
+    }
+    restore_offsets = [
+        (dx, dz)
+        for dx in range(-restore_radius, restore_radius + 1)
+        for dz in range(-restore_radius, restore_radius + 1)
+    ]
+    kept = {
+        (x, z)
+        for x, z in points
+        if any((x + dx, z + dz) in core for dx, dz in restore_offsets)
+    }
+    return kept, len(core)
+
+
+def fill_short_axis_gaps(points, maximum_gap=4):
+    """Repair short extraction seams without joining distant map features."""
+    repaired = set(points)
+
+    def fill(grouped, transpose):
+        additions = set()
+        for fixed, values in grouped.items():
+            ordered = sorted(values)
+            for first, second in zip(ordered, ordered[1:]):
+                gap = second - first - 1
+                if gap < 1 or gap > maximum_gap:
+                    continue
+                support = 0
+                for offset in (-2, -1, 0, 1, 2):
+                    if transpose:
+                        before = (fixed + offset, first)
+                        after = (fixed + offset, second)
+                    else:
+                        before = (first, fixed + offset)
+                        after = (second, fixed + offset)
+                    if before in repaired and after in repaired:
+                        support += 1
+                if support < 3:
+                    continue
+                for value in range(first + 1, second):
+                    additions.add((fixed, value) if transpose else (value, fixed))
+        repaired.update(additions)
+        return additions
+
+    by_z = defaultdict(set)
+    for x, z in repaired:
+        by_z[z].add(x)
+    horizontal = fill(by_z, False)
+
+    by_x = defaultdict(set)
+    for x, z in repaired:
+        by_x[x].add(z)
+    vertical = fill(by_x, True)
+    return repaired, horizontal | vertical
+
+
 def convert(archive, output, preview, min_component):
     categories = {
         "road": {},
@@ -177,20 +245,43 @@ def convert(archive, output, preview, min_component):
             if region_index % 20 == 0 or region_index == len(entries):
                 print(f"regions {region_index}/{len(entries)} chunks={chunk_count}", flush=True)
 
-    kept_roads, component_sizes = keep_largest_road_components(categories["road"], min_component)
+    raw_roads = set(categories["road"])
+    wide_roads, core_size = wide_surface(raw_roads)
+    repaired_roads, repaired_cells = fill_short_axis_gaps(wide_roads)
+    kept_roads, component_sizes = keep_largest_road_components(repaired_roads, min_component)
     near_two = expanded(kept_roads, 2)
-    near_three = expanded(kept_roads, 3)
     marker = {key for key in categories["marker"] if key in near_two}
     surface = {key for key in categories["surface"] if key in near_two}
+    kept_drivable = kept_roads | marker | surface
+    near_three = expanded(kept_drivable, 3)
     sidewalk = {key for key in categories["sidewalk"] if key in near_three}
 
     cells = {}
-    for key in kept_roads:
+    for key in kept_roads & set(categories["road"]):
         y = categories["road"][key]
         flags = ROAD
         if any(y + 2 <= roof_y <= y + 10 for roof_y in tunnel_columns.get(key, ())):
             flags |= TUNNEL
         cells[key] = [y, flags]
+    for key in repaired_cells & kept_drivable:
+        if key in cells or key in marker or key in surface:
+            continue
+        neighbors = []
+        x, z = key
+        for radius in range(1, 5):
+            for dx in range(-radius, radius + 1):
+                for dz in (-radius, radius):
+                    value = categories["road"].get((x + dx, z + dz))
+                    if value is not None:
+                        neighbors.append(value)
+            for dz in range(-radius + 1, radius):
+                for dx in (-radius, radius):
+                    value = categories["road"].get((x + dx, z + dz))
+                    if value is not None:
+                        neighbors.append(value)
+            if neighbors:
+                break
+        cells[key] = [round(sum(neighbors) / len(neighbors)) if neighbors else 0, ROAD]
     for key in marker:
         y = categories["marker"][key]
         current = cells.setdefault(key, [y, 0])
@@ -218,6 +309,7 @@ def convert(archive, output, preview, min_component):
     xs = [key[0] for key in cells]
     zs = [key[1] for key in cells]
     print(f"regions={region_count} chunks={chunk_count}")
+    print(f"roads_raw={len(raw_roads)} core={core_size} narrow_removed={len(raw_roads - wide_roads)} repaired={len(repaired_cells)}")
     print(f"components={component_sizes[:12]}")
     print(f"cells={len(cells)} bounds=({min(xs)},{min(zs)})..({max(xs)},{max(zs)})")
     print(output)
@@ -263,7 +355,7 @@ def main():
     parser.add_argument("archive", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("preview", type=Path)
-    parser.add_argument("--min-component", type=int, default=48)
+    parser.add_argument("--min-component", type=int, default=128)
     args = parser.parse_args()
     convert(args.archive, args.output, args.preview, args.min_component)
 

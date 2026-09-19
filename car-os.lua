@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.9"
+local VERSION = _G.ROADROVER_VERSION or "2.8.0"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -191,6 +191,7 @@ local car = {
     routeIndex = 1,
     recovery = { phase = nil, started = 0, attempts = 0, steer = 0 },
     overtake = { phase = nil, started = 0, side = 1, leadId = nil },
+    controller = { lookaheadBase = 4.5, lookaheadGain = 0.55, deadzoneBase = 0.075, deadzoneGain = 0.004 },
     history = {}
   },
   shipLoad = {
@@ -1415,7 +1416,7 @@ function car.updateShipLoad(force)
   local api = rawget(_G, "tweaked_tweaks") or rawget(_G, "tweakedTweaks")
   if type(api) ~= "table" or type(api.requestShipLoad) ~= "function" then
     state.active = false
-    state.error = "Tweaked Tweaks 1.6.2 required"
+    state.error = "Tweaked Tweaks 1.6.3 required"
     return false
   end
   local ok, result = pcall(api.requestShipLoad, state.leaseSeconds)
@@ -1599,7 +1600,37 @@ function car.updateMap(force)
   if viewOK and type(view) == "table" and view.available == true then
     car.mergeMapView(view)
     local sharedCells = tonumber(view.sharedCells) or 0
-    car.map.scan = { center = { x = vehicleX, y = vehicleY, z = vehicleZ }, sharedCells = sharedCells }
+    local nearestRoad = math.huge
+    local crosswalkDistance = math.huge
+    local tunnelCells = 0
+    local nearbyRoadCells = 0
+    local viewCenter = type(view.center) == "table" and view.center or { x = centerX, z = centerZ }
+    for _, sample in pairs(type(view.samples) == "table" and view.samples or {}) do
+      if type(sample) == "table" then
+        local sampleX = (tonumber(viewCenter.x) or centerX) + (tonumber(sample.x) or 0)
+        local sampleZ = (tonumber(viewCenter.z) or centerZ) + (tonumber(sample.z) or 0)
+        local distance = math.sqrt((sampleX - vehicleX) ^ 2 + (sampleZ - vehicleZ) ^ 2)
+        local kind = tostring(sample.kind or "")
+        if kind == "road" or kind == "crosswalk" or kind == "crosswalk_marker" then
+          nearestRoad = math.min(nearestRoad, distance)
+          if distance <= 18 then nearbyRoadCells = nearbyRoadCells + 1 end
+        end
+        if kind == "crosswalk" or kind == "crosswalk_marker" then
+          crosswalkDistance = math.min(crosswalkDistance, distance)
+        end
+        if sample.tunnel == true and distance <= 28 then tunnelCells = tunnelCells + 1 end
+      end
+    end
+    local confidence = nearestRoad <= 4 and clamp(nearbyRoadCells / 24, 0, 1) or 0
+    car.map.scan = {
+      center = { x = vehicleX, y = vehicleY, z = vehicleZ },
+      sharedCells = sharedCells,
+      loaded = sharedCells > 0,
+      confidence = confidence,
+      estimatedWidth = 12,
+      crosswalkDistance = crosswalkDistance < math.huge and crosswalkDistance or -1,
+      tunnelCells = tunnelCells
+    }
     car.map.error = nil
     car.map.errorDetail = nil
     if sharedCells < 1 and car.map.memory.count < 1 then
@@ -1720,7 +1751,8 @@ function car.aiRouteGeometry(position, points)
     if distance < nearestDistance then nearestDistance = distance; nearestIndex = index end
   end
   car.ai.routeIndex = nearestIndex
-  local wanted = clamp(3.5 + speedBps * 0.9, 4, 16)
+  local controller = car.ai.controller
+  local wanted = clamp(controller.lookaheadBase + speedBps * controller.lookaheadGain, 4, 16)
   local targetIndex = nearestIndex
   local walked = 0
   local previous = position
@@ -1986,7 +2018,9 @@ function car.aiOffsetTarget(position, target, offset)
 end
 
 function car.aiSetSteering(error, aggressive)
-  local deadzone = clamp((aggressive and 0.045 or 0.075) + speedBps * 0.008, 0.05, 0.20)
+  local controller = car.ai.controller
+  local base = aggressive and math.min(0.045, controller.deadzoneBase) or controller.deadzoneBase
+  local deadzone = clamp(base + speedBps * controller.deadzoneGain, 0.04, 0.16)
   car.state.aHeld = error < -deadzone
   car.state.dHeld = error > deadzone
   car.autopilot.steering = car.state.aHeld and "LEFT" or (car.state.dHeld and "RIGHT" or "CENTER")
@@ -2098,6 +2132,12 @@ function car.updateAutopilot()
   local destination = car.map.destination
   local distanceToDestination = destination and math.sqrt((destination.x - position.x) ^ 2 + (destination.z - position.z) ^ 2) or math.huge
   if distanceToDestination <= 3 then car.stopAutopilot("ARRIVED"); return end
+  local finalPoint = points[#points]
+  if destination and finalPoint and car.aiDistance(finalPoint, destination) > 4
+    and car.aiDistance(position, finalPoint) < 10 and now - car.map.lastRoute > 1 then
+    car.updateRoute(true)
+    points = car.routePoints() or points
+  end
   car.aiUpdateDynamics(now, distanceToDestination)
 
   local geometry = car.aiRouteGeometry(position, points)
@@ -2327,6 +2367,7 @@ local function tick()
   debugInfo.d = d
 end
 
+(function()
 local nativeTerm = term.current()
 local ui = nativeTerm
 local leftWin, centerWin, rightWin
@@ -3803,6 +3844,31 @@ function car.drawMapLine(x1, y1, x2, y2, color)
   end
 end
 
+function car.drawMapControlRow(controls, row)
+  local gap = 1
+  local available = math.max(1, layout.centerW - 2)
+  local buttonW = math.max(1, math.floor((available - gap * (#controls - 1)) / #controls))
+  local x = 2
+  for index = 1, #controls do
+    local control = controls[index]
+    local width = index == #controls and math.max(1, layout.centerW - x) or buttonW
+    local active = control[1] == "autopilot" and car.autopilot.enabled
+    local bg = active and colors.lime or COLORS.panel
+    local label = trim(control[2], width)
+    local textX = x + math.max(0, math.floor((width - #label) / 2))
+    fillRect(centerWin, x, row, width, 1, bg)
+    writeAt(centerWin, textX, row, label, bestFg(bg), bg)
+    if control[1] then
+      car.map.boxes[control[1]] = {
+        x1 = layout.centerX + x - 1, y1 = row,
+        x2 = layout.centerX + x + width - 2, y2 = row
+      }
+    end
+    x = x + width + gap
+    if x > layout.centerW then break end
+  end
+end
+
 function car.drawMap(y0)
   engineBox = nil
   actionBoxes = {}
@@ -3940,36 +4006,11 @@ function car.drawMap(y0)
     end
   end
 
-  local function drawControlRow(controls, row)
-    local gap = 1
-    local available = math.max(1, layout.centerW - 2)
-    local buttonW = math.max(1, math.floor((available - gap * (#controls - 1)) / #controls))
-    local x = 2
-    for index = 1, #controls do
-      local control = controls[index]
-      local width = index == #controls and math.max(1, layout.centerW - x) or buttonW
-      local active = control[1] == "autopilot" and car.autopilot.enabled
-      local bg = active and colors.lime or COLORS.panel
-      local label = trim(control[2], width)
-      local textX = x + math.max(0, math.floor((width - #label) / 2))
-      fillRect(centerWin, x, row, width, 1, bg)
-      writeAt(centerWin, textX, row, label, bestFg(bg), bg)
-      if control[1] then
-        car.map.boxes[control[1]] = {
-          x1 = layout.centerX + x - 1, y1 = row,
-          x2 = layout.centerX + x + width - 2, y2 = row
-        }
-      end
-      x = x + width + gap
-      if x > layout.centerW then break end
-    end
-  end
-
   local radiusLabel = "R" .. tostring(car.map.zooms[car.map.zoomIndex] or 32)
-  drawControlRow({
+  car.drawMapControlRow({
     { "zoom_out", "ZOOM -" }, { nil, radiusLabel }, { "zoom_in", "ZOOM +" }, { "recenter", "CENTER" }
   }, controlsY1)
-  drawControlRow({
+  car.drawMapControlRow({
     { "pan_left", "<" }, { "pan_up", "^" }, { "pan_down", "v" }, { "pan_right", ">" },
     { "autopilot", car.autopilot.enabled and "STOP" or "START" }
   }, controlsY2)
@@ -4751,3 +4792,4 @@ end
 
 local ok, err = xpcall(main, debug and debug.traceback or function(e) return e end)
 if not ok then car.safeShutdown(); drawCrash(err) end
+end)()
