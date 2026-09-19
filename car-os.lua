@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.7.8"
+local VERSION = _G.ROADROVER_VERSION or "2.7.9"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -1415,7 +1415,7 @@ function car.updateShipLoad(force)
   local api = rawget(_G, "tweaked_tweaks") or rawget(_G, "tweakedTweaks")
   if type(api) ~= "table" or type(api.requestShipLoad) ~= "function" then
     state.active = false
-    state.error = "Tweaked Tweaks 1.6.1 required"
+    state.error = "Tweaked Tweaks 1.6.2 required"
     return false
   end
   local ok, result = pcall(api.requestShipLoad, state.leaseSeconds)
