@@ -1,4 +1,4 @@
-local RELEASE = "c1a735828fcf64a9f56e7584c63d54e395d25ced"
+local RELEASE = "fb8ecb14f4dc60cfdb1bb1614b9ee0135c875725"
 local RELEASE_BASE = "https://raw.githubusercontent.com/R15ofc/cc-dock-paralimni/" .. RELEASE .. "/"
 local TARGET = "startup.lua"
 local VEHICLE_INFO = "VehicleInfo.json"
