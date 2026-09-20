@@ -41,6 +41,7 @@ return function(car, context)
   }
   local gpuTerminal
   local compactFont
+  local sceneBuilder
   local hdOverlays = {}
   local lastOverlaySignature = ""
   local nativeMap
@@ -87,6 +88,15 @@ return function(car, context)
     if fs.exists(path) then
       local loaded, library = pcall(dofile, path)
       if loaded and type(library) == "table" and type(library.drawText) == "function" then compactFont = library end
+    end
+  end
+
+  do
+    local base = tostring(context.scriptDir or "")
+    local path = base ~= "" and fs.combine(base, "roadrover-scene.lua") or "roadrover-scene.lua"
+    if fs.exists(path) then
+      local loaded, builder = pcall(dofile, path)
+      if loaded and type(builder) == "function" then sceneBuilder = builder end
     end
   end
 
@@ -602,8 +612,9 @@ return function(car, context)
   function car.queueHDDashboard(data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" or (tonumber(car.hd.rendererApi) or 0) < 4 then
-      car.hd.error = "Tweaked Tweaks 1.12.0 renderer required"
+    if not gpu or type(gpu.renderScene) ~= "function" or not sceneBuilder
+      or (tonumber(car.hd.rendererApi) or 0) < 5 then
+      car.hd.error = "Tweaked Tweaks 1.13.0 scene API required"
       return false
     end
     nativeDashboard = data
@@ -613,7 +624,7 @@ return function(car, context)
   function car.queueHDMap(win, x, y, width, height, data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" then return false end
+    if not gpu or type(gpu.renderScene) ~= "function" or not sceneBuilder then return false end
     local originX, originY = 1, 1
     if win and type(win.getPosition) == "function" then
       local positionOK, windowX, windowY = pcall(win.getPosition)
@@ -633,15 +644,10 @@ return function(car, context)
       math.floor(tonumber(height) or 1) * terminalState.cellHeight,
       car.hd.height - data.y
     ))
-    local revision = table.concat({
+    lastMapRevision = table.concat({
       tostring(data.revision or "uncached"), data.x, data.y, data.width, data.height
     }, ":")
-    if data.revision ~= nil and revision == lastMapRevision then
-      nativeMap = nil
-    else
-      nativeMap = data
-      lastMapRevision = revision
-    end
+    nativeMap = data
     return true
   end
 
@@ -706,7 +712,7 @@ return function(car, context)
       end
     end
     return {
-      rendererApi = 4,
+      rendererApi = 5,
       cellWidth = terminalState.cellWidth,
       cellHeight = terminalState.cellHeight,
       fontSize = terminalState.fontSize,
@@ -722,10 +728,14 @@ return function(car, context)
   function car.flushHD()
     if not car.hd.ready or not car.devices.gpu then return false end
     car.hd.error = nil
-    if type(car.devices.gpu.renderRoadRoverFrame) == "function"
+    if type(car.devices.gpu.renderScene) == "function" and sceneBuilder
       and textutils and type(textutils.serializeJSON) == "function" then
       local expectedDashboard = nativeDashboard ~= nil
-      local serializedOK, frame = pcall(textutils.serializeJSON, buildNativeFrame())
+      local sceneOK, scene = pcall(sceneBuilder, buildNativeFrame(), car.hd.width, car.hd.height)
+      local serializedOK, frame = false, scene
+      if sceneOK and type(scene) == "table" then
+        serializedOK, frame = pcall(textutils.serializeJSON, scene)
+      end
       if serializedOK and type(frame) == "string" then
         if frame == lastNativeFrame then
           hdOverlays = {}
@@ -733,9 +743,9 @@ return function(car, context)
           nativeDashboard = nil
           return true
         end
-        local renderOK, result = pcall(car.devices.gpu.renderRoadRoverFrame, frame)
+        local renderOK, result = pcall(car.devices.gpu.renderScene, frame)
         local renderer = type(result) == "table" and tostring(result.renderer or "") or ""
-        local compatible = not expectedDashboard or renderer == "java2d-dashboard"
+        local compatible = not expectedDashboard or renderer == "scene2d"
         if renderOK and result ~= false and compatible then
           lastNativeFrame = frame
           terminalState.dirty = false
@@ -744,13 +754,15 @@ return function(car, context)
           nativeDashboard = nil
           return true
         end
-        car.hd.error = expectedDashboard and "Tweaked Tweaks renderer API v2 unavailable" or tostring(result)
+        car.hd.error = expectedDashboard and "Tweaked Tweaks scene API unavailable" or tostring(result)
         if expectedDashboard then
           hdOverlays = {}
           nativeMap = nil
           nativeDashboard = nil
           return false
         end
+      elseif not sceneOK then
+        car.hd.error = tostring(scene)
       elseif not serializedOK then
         car.hd.error = tostring(frame)
       end

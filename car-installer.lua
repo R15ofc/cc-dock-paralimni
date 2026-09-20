@@ -5,6 +5,7 @@ local VEHICLE_INFO = "VehicleInfo.json"
 local FILES = {
   { source = "car-os.lua", target = TARGET },
   { source = "roadrover-hd.lua", target = "roadrover-hd.lua" },
+  { source = "roadrover-scene.lua", target = "roadrover-scene.lua" },
   { source = "roadrover-music.lua", target = "roadrover-music.lua" },
   { source = "roadrover-font.lua", target = "roadrover-font.lua" },
   { source = "roadrover-bigfont.lua", target = "roadrover-bigfont.lua" }
