@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.9.0"
+local VERSION = _G.ROADROVER_VERSION or "2.9.1"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -2506,8 +2506,8 @@ local function rebuildUI()
 
   local w, h = term.getSize()
   local compact = w < 48 or h < 12
-  local hdCompact = car.hd.ready and w >= 64 and h >= 16
-  local hdDense = car.hd.ready and w >= 88 and h >= 28
+  local hdCompact = car.hd.ready and w >= 56 and h >= 12
+  local hdDense = car.hd.ready and w >= 88 and h >= 24
   local leftW
   local rightW
   if hdDense then
@@ -2637,12 +2637,21 @@ end
 
 function car.drawAnimatedButton(win, x, y, w, h, key, line1, line2, active, activeBg, inactiveBg)
   if w < 1 or h < 1 then return end
+  line1 = trim(line1 or "", math.max(1, w - (w >= 3 and 2 or 0)))
+  if line2 and line2 ~= "" then
+    line2 = trim(line2, math.max(1, w - (w >= 3 and 2 or 0)))
+  end
   activeBg = activeBg or COLORS.activeBg
   inactiveBg = inactiveBg or COLORS.panel
   local activeFg = activeBg == COLORS.activeBg and COLORS.activeText or bestFg(activeBg)
   local inactiveFg = inactiveBg == COLORS.panel and COLORS.panelText or bestFg(inactiveBg)
   local progress = car.animationProgress(key, active)
   local overlayWidth = math.floor(w * progress + 0.5)
+  if car.queueHDRoundedButton
+    and car.queueHDRoundedButton(win, x, y, w, h, line1, line2, progress,
+      activeBg, inactiveBg, activeFg, inactiveFg) then
+    return
+  end
   fillRect(win, x, y, w, h, inactiveBg)
   if overlayWidth > 0 then fillRect(win, x, y, overlayWidth, h, activeBg) end
   if line2 and line2 ~= "" and h >= 2 then
@@ -3439,7 +3448,7 @@ local function drawLeft()
   end
   local num = tostring(math.floor(speedVal + 0.5))
   local bf = loadBigFont()
-  local canBig = bf and type(bf.bigWrite) == "function" and bigTextWidth(num) <= layout.leftW
+  local canBig = not car.hd.ready and bf and type(bf.bigWrite) == "function" and bigTextWidth(num) <= layout.leftW
   local bw = canBig and bigTextWidth(num) or #num
   local bx = math.max(1, math.floor((layout.leftW - bw) / 2) + 1)
 
@@ -3515,8 +3524,8 @@ function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX,
   local navigationH = layout.hdDense and math.min(availableH, 5)
     or (layout.hdCompact and math.min(availableH, 7) or availableH)
   if quickW > 0 then
-    fillRect(centerWin, mapX, top, quickW, navigationH, COLORS.panel)
-    drawVerticalLabel(centerWin, mapX, top, quickW, navigationH, "MAP", COLORS.panelText, COLORS.panel)
+    car.drawAnimatedButton(centerWin, mapX, top, quickW, navigationH, "home:map", "MAP", nil, false,
+      COLORS.activeBg, COLORS.panel)
     quickMapBox = {
       x1 = layout.centerX + mapX - 1,
       y1 = top,
@@ -3524,8 +3533,8 @@ function car.drawHomeNavigation(top, availableH, mapX, settingsX, quickW, modeX,
       y2 = top + navigationH - 1
     }
 
-    fillRect(centerWin, settingsX, top, quickW, navigationH, COLORS.panel)
-    drawVerticalLabel(centerWin, settingsX, top, quickW, navigationH, "SETTINGS", COLORS.panelText, COLORS.panel, 2)
+    car.drawAnimatedButton(centerWin, settingsX, top, quickW, navigationH, "home:settings", "SET", nil, false,
+      COLORS.activeBg, COLORS.panel)
     quickSettingsBox = {
       x1 = layout.centerX + settingsX - 1,
       y1 = top,
@@ -3715,11 +3724,11 @@ local function drawActions(y0, viewId)
   local navUp = "/\\"
   local navDn = "\\/"
   local upBg = COLORS.panel
-  local upFg = COLORS.panelText
   local dnBg = COLORS.panel
-  local dnFg = COLORS.panelText
-  writeAt(centerWin, navX, navY, navUp, upFg, upBg)
-  writeAt(centerWin, navX, navY + 2, navDn, dnFg, dnBg)
+  car.drawAnimatedButton(centerWin, navX, navY, #navUp, 1, "actions:page_up", navUp, nil, false,
+    COLORS.activeBg, upBg)
+  car.drawAnimatedButton(centerWin, navX, navY + 2, #navDn, 1, "actions:page_down", navDn, nil, false,
+    COLORS.activeBg, dnBg)
   actionBoxes.pageUp = {
     x1 = layout.centerX + navX - 1,
     y1 = navY,
@@ -3738,9 +3747,8 @@ local function drawActions(y0, viewId)
     local y = listTop
 
     local function addBtn(id, label)
-      fillRect(centerWin, btnX, y, btnW, btnH, COLORS.panel)
-      local tx = btnX + math.floor((btnW - #label) / 2)
-      writeAt(centerWin, tx, y, label, COLORS.panelText, COLORS.panel)
+      car.drawAnimatedButton(centerWin, btnX, y, btnW, btnH, "action:" .. id, label, nil, false,
+        COLORS.activeBg, COLORS.panel)
       actionBoxes[id] = {
         x1 = layout.centerX + btnX - 1,
         y1 = y,
@@ -3761,9 +3769,8 @@ local function drawActions(y0, viewId)
     local listTop = y0 + 1
     local y = listTop
     local function addInfoBtn(id, label)
-      fillRect(centerWin, btnX, y, btnW, btnH, COLORS.panel)
-      local tx = btnX + math.floor((btnW - #label) / 2)
-      writeAt(centerWin, tx, y, label, COLORS.panelText, COLORS.panel)
+      car.drawAnimatedButton(centerWin, btnX, y, btnW, btnH, "info:" .. id, label, nil, false,
+        COLORS.activeBg, COLORS.panel)
       actionBoxes[id] = {
         x1 = layout.centerX + btnX - 1,
         y1 = y,
@@ -3790,8 +3797,10 @@ local function drawSettings(y0)
   local navY = math.max(3, math.floor(layout.h / 2) + 1)
   local navUp = "/\\"
   local navDn = "\\/"
-  writeAt(centerWin, navX, navY, navUp, COLORS.panelText, COLORS.panel)
-  writeAt(centerWin, navX, navY + 2, navDn, COLORS.panelText, COLORS.panel)
+  car.drawAnimatedButton(centerWin, navX, navY, #navUp, 1, "settings:page_up", navUp, nil, false,
+    COLORS.activeBg, COLORS.panel)
+  car.drawAnimatedButton(centerWin, navX, navY + 2, #navDn, 1, "settings:page_down", navDn, nil, false,
+    COLORS.activeBg, COLORS.panel)
   settingsBoxes.pageUp = {
     x1 = layout.centerX + navX - 1,
     y1 = navY,
@@ -3830,8 +3839,8 @@ local function drawSettings(y0)
   local idx = settingsViewIndex
   while y + btnH - 1 <= layout.h and idx <= #items do
     local item = items[idx]
-    fillRect(centerWin, btnX, y, btnW, btnH, COLORS.panel)
-    writeAt(centerWin, btnX + 2, y, item.label, COLORS.panelText, COLORS.panel)
+    car.drawAnimatedButton(centerWin, btnX, y, btnW, btnH, "settings:" .. item.id, item.label, nil, false,
+      COLORS.activeBg, COLORS.panel)
     settingsBoxes[item.id] = {
       x1 = layout.centerX + btnX - 1,
       y1 = y,
@@ -3949,16 +3958,17 @@ function car.drawMapLine(x1, y1, x2, y2, color)
   end
 end
 
-function car.drawMapVerticalControl(id, label, row, width, active)
-  if row < 1 or row > layout.h then return end
-  local bg = active and colors.lime or colors.black
-  local fg = active and colors.black or colors.white
-  local text = trim(tostring(label or ""), width)
-  fillRect(centerWin, 1, row, width, 1, bg)
-  writeAt(centerWin, 1 + math.max(0, math.floor((width - #text) / 2)), row, text, fg, bg)
+function car.drawMapControl(id, label, x, row, width, height, active)
+  if row < 1 or row > layout.h or x < 1 or x > layout.centerW then return end
+  width = math.min(math.floor(tonumber(width) or 0), layout.centerW - x + 1)
+  height = math.min(math.floor(tonumber(height) or 0), layout.h - row + 1)
+  if width < 1 or height < 1 then return end
+  local text = trim(tostring(label or ""), math.max(1, width - 1))
+  car.drawAnimatedButton(centerWin, x, row, width, height, "map:" .. id, text, nil, active,
+    colors.lime, colors.black)
   car.map.boxes[id] = {
-    x1 = layout.centerX, y1 = row,
-    x2 = layout.centerX + width - 1, y2 = row
+    x1 = layout.centerX + x - 1, y1 = row,
+    x2 = layout.centerX + x + width - 2, y2 = row + height - 1
   }
 end
 
@@ -4093,7 +4103,7 @@ function car.drawMap(y0)
     centerText(centerWin, math.floor((mapY1 + mapY2) / 2), "Map unavailable", layout.centerW, colors.red, colors.lightGray)
   end
 
-  local controlW = math.min(8, math.max(4, math.floor(layout.centerW * 0.08)))
+  local controlW = math.min(9, math.max(7, math.floor(layout.centerW * 0.12)))
   local statusError = car.map.error and not feedbackActive
   local statusX = math.min(layout.centerW, controlW + 2)
   local statusW = math.max(1, layout.centerW - statusX + 1)
@@ -4113,16 +4123,31 @@ function car.drawMap(y0)
     end
   end
 
-  car.drawMapVerticalControl("autopilot", car.autopilot.enabled and "AUTO ON" or "AUTO", 1, controlW,
+  local buttonH = layout.h >= 18 and 2 or 1
+  local gap = 1
+  local autoY = 1
+  local zoomY = autoY + buttonH + gap
+  local centerY = zoomY + buttonH + gap
+  local upY = centerY + buttonH + gap
+  local directionsY = upY + buttonH + gap
+  local splitGap = 1
+  local halfW = math.max(1, math.floor((controlW - splitGap) / 2))
+  local thirdW = math.max(1, math.floor((controlW - splitGap * 2) / 3))
+  local rightThirdW = math.max(1, controlW - thirdW * 2 - splitGap * 2)
+
+  car.drawMapControl("autopilot", car.autopilot.enabled and "AUTO ON" or "AUTO", 1, autoY, controlW, buttonH,
     car.map.autoPilotArmed or car.autopilot.enabled)
-  car.drawMapVerticalControl("zoom_out", "-", 2, controlW, false)
-  car.drawMapVerticalControl("zoom_in", "+", 3, controlW, false)
-  car.drawMapVerticalControl("recenter", "CENTER", 4, controlW, false)
-  car.drawMapVerticalControl("pan_up", "^", 5, controlW, false)
-  car.drawMapVerticalControl("pan_down", "v", 6, controlW, false)
-  car.drawMapVerticalControl("pan_left", "<", 7, controlW, false)
-  car.drawMapVerticalControl("pan_right", ">", 8, controlW, false)
-  car.drawMapVerticalControl("map_exit", "MENU", layout.h, controlW, false)
+  car.drawMapControl("zoom_out", "-", 1, zoomY, halfW, buttonH, false)
+  car.drawMapControl("zoom_in", "+", halfW + splitGap + 1, zoomY,
+    controlW - halfW - splitGap, buttonH, false)
+  car.drawMapControl("recenter", "CENTER", 1, centerY, controlW, buttonH, false)
+  car.drawMapControl("pan_up", "^", 1, upY, controlW, buttonH, false)
+  car.drawMapControl("pan_left", "<", 1, directionsY, thirdW, buttonH, false)
+  car.drawMapControl("pan_down", "v", thirdW + splitGap + 1, directionsY, thirdW, buttonH, false)
+  car.drawMapControl("pan_right", ">", thirdW * 2 + splitGap * 2 + 1, directionsY, rightThirdW, buttonH, false)
+  local exitY = math.min(layout.h - buttonH + 1,
+    math.max(directionsY + buttonH + gap, layout.h - buttonH + 1))
+  car.drawMapControl("map_exit", "MENU", 1, exitY, controlW, buttonH, false)
 end
 
 function car.drawMapSafe(y0)
@@ -4284,12 +4309,8 @@ local function drawRightPageButton(l)
   end
   local pageLabel = (tabPage == 1) and ">>" or "<<"
   if l.tabW <= 4 then pageLabel = (tabPage == 1) and ">" or "<" end
-  local pageBg = COLORS.panel
-  local pageFg = COLORS.panelText
-  fillRect(rightWin, l.tabsX, l.pageY, l.tabW, l.pageH, pageBg)
-  local pageTextY = l.pageY + math.floor(l.pageH / 2)
-  local ptx = l.tabsX + math.floor((l.tabW - #pageLabel) / 2)
-  writeAt(rightWin, ptx, pageTextY, pageLabel, pageFg, pageBg)
+  car.drawAnimatedButton(rightWin, l.tabsX, l.pageY, l.tabW, l.pageH, "sidebar:page", pageLabel, nil,
+    false, COLORS.activeBg, COLORS.panel)
   pageBox = {
     x1 = layout.rightX + l.tabsX - 1,
     y1 = l.pageY,
@@ -4311,6 +4332,7 @@ local function drawRight()
 end
 
 redraw = function()
+  if car.clearHDOverlays then car.clearHDOverlays() end
   drawLeft()
   drawCenter()
   local selected = tabs[activeTab] or {}

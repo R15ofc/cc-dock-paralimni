@@ -30,7 +30,8 @@ return function(car, context)
     width = 63,
     height = 24,
     cellWidth = 6,
-    cellHeight = 8,
+    cellHeight = 9,
+    fontHeight = 8,
     offsetX = 1,
     offsetY = 1,
     lines = {},
@@ -39,6 +40,8 @@ return function(car, context)
   }
   local gpuTerminal
   local compactFont
+  local hdOverlays = {}
+  local lastOverlaySignature = ""
 
   do
     local base = tostring(context.scriptDir or "")
@@ -95,11 +98,11 @@ return function(car, context)
   local function textLength(text)
     local gpu = car.devices.gpu
     text = tostring(text or "")
-    if compactFont and type(compactFont.measure) == "function" then return compactFont.measure(text) end
     if gpu and type(gpu.getTextLength) == "function" then
       local ok, width = pcall(gpu.getTextLength, text, 1, 1)
       if ok and tonumber(width) then return math.max(0, math.floor(width)) end
     end
+    if compactFont and type(compactFont.measure) == "function" then return compactFont.measure(text) end
     return #text * terminalState.cellWidth
   end
 
@@ -108,7 +111,7 @@ return function(car, context)
     if not gpu or type(gpu.drawText) ~= "function" then return false end
     x = math.floor(tonumber(x) or 1)
     y = math.floor(tonumber(y) or 1)
-    if x < 1 or y < 1 or x > (tonumber(car.hd.width) or 0) or y + terminalState.cellHeight - 1 > (tonumber(car.hd.height) or 0) then
+    if x < 1 or y < 1 or x > (tonumber(car.hd.width) or 0) or y + terminalState.fontHeight - 1 > (tonumber(car.hd.height) or 0) then
       return false
     end
     text = tostring(text or "")
@@ -118,10 +121,11 @@ return function(car, context)
     )
     while #text > 0 and textLength(text) > maxWidth do text = text:sub(1, -2) end
     if text == "" or maxWidth <= 0 then return true end
-    if compactFont then return compactFont.drawText(fillPixels, x, y, text, rgb, maxWidth) end
     local ok, err = pcall(gpu.drawText, x, y, text, signedARGB(rgb), -1, 1, 1)
-    if not ok then car.hd.error = tostring(err) end
-    return ok
+    if ok then return true end
+    if compactFont then return compactFont.drawText(fillPixels, x, y, text, rgb, maxWidth) end
+    car.hd.error = tostring(err)
+    return false
   end
 
   local function cellPixelX(x)
@@ -134,6 +138,87 @@ return function(car, context)
 
   local function clearWith(color)
     fillPixels(1, 1, car.hd.width, car.hd.height, colorRGB(color))
+  end
+
+  local function fillRoundedPixels(x, y, width, height, radius, rgb, clipWidth)
+    width = math.floor(tonumber(width) or 0)
+    height = math.floor(tonumber(height) or 0)
+    if width <= 0 or height <= 0 then return false end
+    radius = clip(tonumber(radius) or 0, 0, math.floor(math.min(width, height) / 2))
+    local clipRight = x + width - 1
+    if clipWidth ~= nil then
+      clipRight = math.min(clipRight, x + math.max(0, math.floor(clipWidth)) - 1)
+    end
+    if clipRight < x then return true end
+
+    local function span(spanX, spanY, spanWidth, spanHeight)
+      spanWidth = math.min(spanWidth, clipRight - spanX + 1)
+      if spanWidth <= 0 or spanHeight <= 0 then return true end
+      return fillPixels(spanX, spanY, spanWidth, spanHeight, rgb)
+    end
+
+    if radius < 2 or width < 5 or height < 3 then
+      return span(x, y, width, height)
+    end
+
+    local ok = span(x + radius, y, width - radius * 2, 1)
+    if height > 2 then ok = span(x + 1, y + 1, width - 2, height - 2) and ok end
+    if height > radius * 2 then ok = span(x, y + radius, width, height - radius * 2) and ok end
+    ok = span(x + radius, y + height - 1, width - radius * 2, 1) and ok
+    return ok
+  end
+
+  local function overlaySignature()
+    local parts = {}
+    for index = 1, #hdOverlays do
+      local overlay = hdOverlays[index]
+      parts[#parts + 1] = table.concat({
+        overlay.x, overlay.y, overlay.width, overlay.height,
+        overlay.line1 or "", overlay.line2 or "",
+        string.format("%.3f", tonumber(overlay.progress) or 0),
+        overlay.activeBg, overlay.inactiveBg, overlay.activeFg, overlay.inactiveFg
+      }, ":")
+    end
+    return table.concat(parts, "|")
+  end
+
+  local function renderRoundedButton(overlay)
+    local pixelX = cellPixelX(overlay.x) + 1
+    local pixelY = cellPixelY(overlay.y)
+    local pixelWidth = overlay.width * terminalState.cellWidth - 2
+    local pixelHeight = overlay.height * terminalState.cellHeight - 1
+    if pixelWidth <= 0 or pixelHeight <= 0 then return true end
+
+    local radius = math.min(4, math.floor(pixelHeight / 2), math.floor(pixelWidth / 2))
+    local progress = math.max(0, math.min(1, tonumber(overlay.progress) or 0))
+    local ok = fillRoundedPixels(pixelX, pixelY, pixelWidth, pixelHeight, radius, colorRGB(overlay.inactiveBg))
+    if progress > 0 then
+      ok = fillRoundedPixels(pixelX, pixelY, pixelWidth, pixelHeight, radius, colorRGB(overlay.activeBg),
+        math.floor(pixelWidth * progress + 0.5)) and ok
+    end
+
+    local textRGB = colorRGB(progress >= 0.5 and overlay.activeFg or overlay.inactiveFg)
+    local labels = {}
+    if overlay.line1 and overlay.line1 ~= "" then labels[#labels + 1] = overlay.line1 end
+    if overlay.line2 and overlay.line2 ~= "" then labels[#labels + 1] = overlay.line2 end
+    local totalHeight = #labels * terminalState.fontHeight
+    local textY = pixelY + math.max(0, math.floor((pixelHeight - totalHeight) / 2))
+    for index = 1, #labels do
+      local label = labels[index]
+      local width = textLength(label)
+      local textX = pixelX + math.max(0, math.floor((pixelWidth - width) / 2))
+      ok = drawTextPixels(textX, textY + (index - 1) * terminalState.fontHeight, label, textRGB,
+        math.max(1, pixelWidth - (textX - pixelX))) and ok
+    end
+    return ok
+  end
+
+  local function renderOverlays()
+    local ok = true
+    for index = 1, #hdOverlays do
+      ok = renderRoundedButton(hdOverlays[index]) and ok
+    end
+    return ok
   end
 
   local function blankLine()
@@ -386,12 +471,25 @@ return function(car, context)
         local profileOK, profile = pcall(gpu.getHDProfile)
         if profileOK and type(profile) == "table" then hdProfile = profile end
       end
-      local targetDensity = hdProfile and tonumber(hdProfile.recommendedPixelDensity) or 64
-      targetDensity = math.floor(math.max(16, math.min(96, targetDensity)))
+      local requestedDensity = tonumber(_G.ROADROVER_HD_DENSITY) or 128
+      local maximumDensity = hdProfile and tonumber(hdProfile.maximumPixelDensity) or requestedDensity
+      local targetDensity = math.floor(math.max(64, math.min(requestedDensity, maximumDensity or requestedDensity)))
       if type(gpu.setSize) == "function" then
-        local densityOK = pcall(gpu.setSize, targetDensity)
-        if not densityOK and targetDensity ~= 64 then gpu.setSize(64) end
+        local candidates = { targetDensity, 96, 64 }
+        local applied = false
+        for index = 1, #candidates do
+          local density = candidates[index]
+          if density <= targetDensity or index == 1 then
+            local densityOK, result = pcall(gpu.setSize, density)
+            if densityOK and result ~= false then
+              applied = true
+              break
+            end
+          end
+        end
+        if not applied then error("GPU rejected every HD density", 0) end
       end
+      if type(gpu.setFont) == "function" then pcall(gpu.setFont, "ascii") end
       if sleep then sleep(0.2) end
       if type(gpu.getSize) == "function" then
         local width, height = gpu.getSize()
@@ -413,10 +511,11 @@ return function(car, context)
     car.hd.width = math.floor(detectedWidth)
     car.hd.height = math.floor(detectedHeight)
     car.hd.profile = hdProfile
-    terminalState.cellWidth = (compactFont and tonumber(compactFont.cellWidth))
-      or (hdProfile and tonumber(hdProfile.terminalCellWidth)) or 6
-    terminalState.cellHeight = (compactFont and tonumber(compactFont.cellHeight))
-      or (hdProfile and tonumber(hdProfile.terminalCellHeight)) or 8
+    car.hd.pixelDensity = hdProfile and tonumber(hdProfile.pixelDensity) or nil
+    car.hd.font = "ascii"
+    terminalState.cellWidth = 6
+    terminalState.cellHeight = 9
+    terminalState.fontHeight = 8
     terminalState.width = math.max(1, math.floor(car.hd.width / terminalState.cellWidth))
     terminalState.height = math.max(1, math.floor(car.hd.height / terminalState.cellHeight))
     terminalState.offsetX = math.floor((car.hd.width - terminalState.width * terminalState.cellWidth) / 2) + 1
@@ -437,12 +536,58 @@ return function(car, context)
     return gpuTerminal
   end
 
+  function car.clearHDOverlays()
+    hdOverlays = {}
+  end
+
+  function car.queueHDRoundedButton(win, x, y, width, height, line1, line2, progress,
+      activeBg, inactiveBg, activeFg, inactiveFg)
+    if not car.hd.ready then return false end
+    local originX, originY = 1, 1
+    if win and type(win.getPosition) == "function" then
+      local positionOK, windowX, windowY = pcall(win.getPosition)
+      if positionOK and tonumber(windowX) and tonumber(windowY) then
+        originX, originY = math.floor(windowX), math.floor(windowY)
+      end
+    end
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    width = math.floor(tonumber(width) or 0)
+    height = math.floor(tonumber(height) or 0)
+    if width < 1 or height < 1 then return false end
+    hdOverlays[#hdOverlays + 1] = {
+      x = originX + x - 1,
+      y = originY + y - 1,
+      width = width,
+      height = height,
+      line1 = tostring(line1 or ""),
+      line2 = line2 and tostring(line2) or nil,
+      progress = tonumber(progress) or 0,
+      activeBg = tonumber(activeBg) or colors.white,
+      inactiveBg = tonumber(inactiveBg) or colors.black,
+      activeFg = tonumber(activeFg) or colors.black,
+      inactiveFg = tonumber(inactiveFg) or colors.white
+    }
+    return true
+  end
+
   function car.flushHD()
     if not car.hd.ready or not car.devices.gpu then return false end
     car.hd.error = nil
+    local signature = overlaySignature()
+    local overlaysChanged = signature ~= lastOverlaySignature
+    if overlaysChanged then
+      terminalState.renderedLines = {}
+      terminalState.dirty = true
+    end
     local rendered, changed = renderBuffer()
     if not rendered then return false end
-    if not changed then return true end
+    if changed or overlaysChanged then
+      if not renderOverlays() then return false end
+    end
+    hdOverlays = {}
+    lastOverlaySignature = signature
+    if not changed and not overlaysChanged then return true end
     local ok, err = pcall(car.devices.gpu.sync)
     if not ok then car.hd.error = tostring(err) end
     return ok
