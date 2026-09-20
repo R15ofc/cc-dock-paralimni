@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.9.3"
+local VERSION = _G.ROADROVER_VERSION or "2.9.4"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -3624,7 +3624,7 @@ local function drawHome(y0)
     end
 
     local dayNum = tonumber(os.date("%d")) or 0
-    car.queueHDDashboard({
+    local queued = car.queueHDDashboard({
       speed = speedText,
       unit = unitText,
       time = os.date("%I:%M %p"):gsub("^0", ""),
@@ -3644,6 +3644,13 @@ local function drawHome(y0)
       controls = controls,
       modes = modes
     })
+    if not queued then
+      clearWin(centerWin, colors.white, colors.black)
+      centerText(centerWin, math.max(2, math.floor(layout.h / 2) - 1), "NATIVE UI UPDATE REQUIRED",
+        layout.centerW, colors.black, colors.white)
+      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1), "Tweaked Tweaks 1.9.1",
+        layout.centerW, colors.gray, colors.white)
+    end
     return
   end
 

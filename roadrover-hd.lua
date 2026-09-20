@@ -530,6 +530,7 @@ return function(car, context)
     car.hd.height = math.floor(detectedHeight)
     car.hd.profile = hdProfile
     car.hd.pixelDensity = hdProfile and tonumber(hdProfile.pixelDensity) or nil
+    car.hd.rendererApi = hdProfile and tonumber(hdProfile.rendererApi) or 0
     car.hd.font = "ascii"
     local density = tonumber(car.hd.pixelDensity) or 192
     local uiScale = math.max(1, density / 192)
@@ -566,7 +567,10 @@ return function(car, context)
   function car.queueHDDashboard(data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" then return false end
+    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" or (tonumber(car.hd.rendererApi) or 0) < 2 then
+      car.hd.error = "Tweaked Tweaks 1.9.1 renderer required"
+      return false
+    end
     nativeDashboard = data
     return true
   end
@@ -653,6 +657,7 @@ return function(car, context)
       }
     end
     return {
+      rendererApi = 2,
       cellWidth = terminalState.cellWidth,
       cellHeight = terminalState.cellHeight,
       fontSize = terminalState.fontSize,
@@ -670,6 +675,7 @@ return function(car, context)
     car.hd.error = nil
     if type(car.devices.gpu.renderRoadRoverFrame) == "function"
       and textutils and type(textutils.serializeJSON) == "function" then
+      local expectedDashboard = nativeDashboard ~= nil
       local serializedOK, frame = pcall(textutils.serializeJSON, buildNativeFrame())
       if serializedOK and type(frame) == "string" then
         if frame == lastNativeFrame then
@@ -679,7 +685,9 @@ return function(car, context)
           return true
         end
         local renderOK, result = pcall(car.devices.gpu.renderRoadRoverFrame, frame)
-        if renderOK and result ~= false then
+        local renderer = type(result) == "table" and tostring(result.renderer or "") or ""
+        local compatible = not expectedDashboard or renderer == "java2d-dashboard"
+        if renderOK and result ~= false and compatible then
           lastNativeFrame = frame
           terminalState.dirty = false
           hdOverlays = {}
@@ -687,7 +695,13 @@ return function(car, context)
           nativeDashboard = nil
           return true
         end
-        car.hd.error = tostring(result)
+        car.hd.error = expectedDashboard and "Tweaked Tweaks renderer API v2 unavailable" or tostring(result)
+        if expectedDashboard then
+          hdOverlays = {}
+          nativeMap = nil
+          nativeDashboard = nil
+          return false
+        end
       elseif not serializedOK then
         car.hd.error = tostring(frame)
       end
