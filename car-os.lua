@@ -3537,7 +3537,7 @@ local function buildHDDashboard(pageId)
     date = os.date("%d %b"):gsub("^0", ""),
     rightX = layout.rightX,
     rightWidth = layout.rightW,
-    menuStartY = 2,
+    menuStartY = 4,
     menuHeight = 2,
     menuGap = 1,
     activeMenu = pageId,
@@ -4483,7 +4483,7 @@ local function computeRightLayout()
   local tabsX = 1
   local tabW = layout.rightW
   local tabH = 2
-  local startY = layout.hdCompact and 1 or 3
+  local startY = layout.hdCompact and 4 or 3
   local tabGap = layout.hdCompact and 1 or 0
   local pageH = 0
   local pageY = pageH > 0 and math.max(2, layout.h - pageH + 1) or layout.h + 1
