@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.9.1"
+local VERSION = _G.ROADROVER_VERSION or "2.9.2"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -132,6 +132,7 @@ local car = {
   map = {
     zooms = { 16, 32, 64, 128, 256 },
     zoomIndex = 2,
+    rotationMode = "heading",
     panX = 0,
     panZ = 0,
     scan = nil,
@@ -2155,17 +2156,15 @@ end
 
 function car.setAutopilot(enabled)
   if not enabled then car.map.autoPilotArmed = false; car.stopAutopilot("OFF"); return true end
-  car.map.autoPilotArmed = true
   if not car.map.destination then
+    car.map.autoPilotArmed = true
     car.autopilot.status = "SET DESTINATION"
     car.setMapFeedback("TAP MAP TO SET DESTINATION", 5)
     return true
   end
-  if car.state.driveEngineOff then
-    car.autopilot.status = "ENGINE OFF"
-    car.setMapFeedback("TURN ON DRIVE ENGINE FIRST", 5)
-    return false
-  end
+  car.map.autoPilotArmed = false
+  car.state.driveEngineOff = false
+  car.engineOn = true
   car.safeUpdateMap(true)
   if not car.routePoints() and not car.updateRoute(true) then
     car.autopilot.status = "ROUTE UNAVAILABLE"
@@ -2188,9 +2187,25 @@ function car.setAutopilot(enabled)
   car.ai.recovery.phase = nil
   car.ai.recovery.attempts = 0
   car.ai.overtake.phase = nil
+  car.applyOutputs()
   car.markVehicleStateDirty()
   car.setMapFeedback("AUTOPILOT ACTIVE", 4)
   return true
+end
+
+function car.handleMapAutopilotControl()
+  if car.autopilot.enabled then
+    car.safeSetAutopilot(false)
+    car.setMapFeedback("AUTOPILOT STOPPED", 3)
+    return true
+  end
+  if not car.map.destination then
+    car.map.autoPilotArmed = true
+    car.setMapFeedback("TAP THE ROAD TO SET DESTINATION", 6)
+    return true
+  end
+  car.map.autoPilotArmed = false
+  return car.safeSetAutopilot(true)
 end
 
 function car.safeSetAutopilot(enabled)
@@ -3254,46 +3269,6 @@ local function drawSpeedBig(win, x, y, num, bf)
   return tonumber(bf.height) or 3
 end
 
-local function drawBigLabel(win, x, y, text, bg, fg, bf)
-  local prev = term.current()
-  term.redirect(win)
-  term.setCursorPos(x, y)
-  term.setBackgroundColor(bg)
-  term.setTextColor(fg)
-  bf.bigWrite(text)
-  term.redirect(prev)
-end
-
-local function drawQuickActionsBlock(bigX, bigY, bigW, bigH)
-  if bigH < 2 then return nil end
-  fillRect(centerWin, bigX, bigY, bigW, bigH, COLORS.panel)
-  local l1 = "Quick"
-  local l2 = "Actions"
-  local bf = loadBigFont()
-  local fontHeight = bf and tonumber(bf.height) or 3
-  local canBig = bf and type(bf.bigWrite) == "function"
-    and bigTextWidth(l1) <= bigW and bigTextWidth(l2) <= bigW
-    and bigH >= fontHeight * 2
-  if canBig then
-    local totalH = fontHeight * 2
-    local ty = bigY + math.floor((bigH - totalH) / 2)
-    local x1 = bigX + math.floor((bigW - bigTextWidth(l1)) / 2)
-    local x2 = bigX + math.floor((bigW - bigTextWidth(l2)) / 2)
-    drawBigLabel(centerWin, x1, ty, l1, COLORS.panel, COLORS.panelText, bf)
-    drawBigLabel(centerWin, x2, ty + fontHeight, l2, COLORS.panel, COLORS.panelText, bf)
-  else
-    local ty = bigY + math.floor((bigH - 2) / 2)
-    writeAt(centerWin, bigX + math.floor((bigW - #l1) / 2), ty, l1, COLORS.panelText, COLORS.panel)
-    writeAt(centerWin, bigX + math.floor((bigW - #l2) / 2), ty + 1, l2, COLORS.panelText, COLORS.panel)
-  end
-  return {
-    x1 = layout.centerX + bigX - 1,
-    y1 = bigY,
-    x2 = layout.centerX + bigX + bigW - 2,
-    y2 = bigY + bigH - 1
-  }
-end
-
 local function computeHomeLayout(y0)
   local btnH = 2
   local margin = 1
@@ -3448,7 +3423,7 @@ local function drawLeft()
   end
   local num = tostring(math.floor(speedVal + 0.5))
   local bf = loadBigFont()
-  local canBig = not car.hd.ready and bf and type(bf.bigWrite) == "function" and bigTextWidth(num) <= layout.leftW
+  local canBig = bf and type(bf.bigWrite) == "function" and bigTextWidth(num) <= layout.leftW
   local bw = canBig and bigTextWidth(num) or #num
   local bx = math.max(1, math.floor((layout.leftW - bw) / 2) + 1)
 
@@ -3934,11 +3909,35 @@ function car.drawDrive(y0)
   end
 end
 
-function car.mapProject(worldX, worldZ, centerX, centerZ, radius, x1, y1, x2, y2)
+function car.mapRotation()
+  if car.map.rotationMode ~= "heading" then return 0 end
+  local heading = car.shipHeading()
+  if not heading then return 0 end
+  return -heading - math.pi / 2
+end
+
+function car.panMap(screenX, screenY, distance)
+  local rotation = car.mapRotation()
+  local cosine = math.cos(rotation)
+  local sine = math.sin(rotation)
+  local rotatedX = (tonumber(screenX) or 0) * (tonumber(distance) or 0)
+  local rotatedZ = (tonumber(screenY) or 0) * (tonumber(distance) or 0)
+  car.map.panX = car.map.panX + rotatedX * cosine + rotatedZ * sine
+  car.map.panZ = car.map.panZ - rotatedX * sine + rotatedZ * cosine
+end
+
+function car.mapProject(worldX, worldZ, centerX, centerZ, radius, x1, y1, x2, y2, rotation)
   local width = math.max(1, x2 - x1)
   local height = math.max(1, y2 - y1)
-  local sx = x1 + math.floor(((worldX - centerX + radius) / (radius * 2)) * width + 0.5)
-  local sy = y1 + math.floor(((worldZ - centerZ + radius) / (radius * 2)) * height + 0.5)
+  local dx = worldX - centerX
+  local dz = worldZ - centerZ
+  rotation = tonumber(rotation) or 0
+  local cosine = math.cos(rotation)
+  local sine = math.sin(rotation)
+  local rotatedX = dx * cosine - dz * sine
+  local rotatedZ = dx * sine + dz * cosine
+  local sx = x1 + math.floor(((rotatedX + radius) / (radius * 2)) * width + 0.5)
+  local sy = y1 + math.floor(((rotatedZ + radius) / (radius * 2)) * height + 0.5)
   if sx < x1 or sx > x2 or sy < y1 or sy > y2 then return nil, nil end
   return sx, sy
 end
@@ -3972,6 +3971,120 @@ function car.drawMapControl(id, label, x, row, width, height, active)
   }
 end
 
+function car.drawMapCanvas(view, scan, mapX1, mapY1, mapX2, mapY2)
+  local center = view.center or {}
+  local centerX = tonumber(center.x) or 0
+  local centerZ = tonumber(center.z) or 0
+  local radius = tonumber(view.radius) or (car.map.zooms[car.map.zoomIndex] or 32)
+  local rotation = car.mapRotation()
+  local heading = car.shipHeading() or 0
+  local points = car.routePoints()
+  local ships = car.ai.perception.ships
+  local protectedTraffic = car.ai.perception.traffic
+  local vehicle = view.vehicle or (scan and scan.center)
+  car.map.viewport = {
+    x1 = layout.centerX + mapX1 - 1, y1 = mapY1,
+    x2 = layout.centerX + mapX2 - 1, y2 = mapY2,
+    localX1 = mapX1, localY1 = mapY1, localX2 = mapX2, localY2 = mapY2,
+    centerX = centerX, centerZ = centerZ, radius = radius, rotation = rotation
+  }
+
+  local nativeMapQueued = car.queueHDMap and car.queueHDMap(centerWin, mapX1, mapY1,
+    mapX2 - mapX1 + 1, mapY2 - mapY1 + 1, {
+      centerX = centerX,
+      centerZ = centerZ,
+      radius = radius,
+      rotation = rotation,
+      heading = heading,
+      samples = view.samples or {},
+      route = points or {},
+      destination = car.map.destination,
+      vehicle = vehicle,
+      ships = type(ships) == "table" and ships.ships or {},
+      traffic = type(protectedTraffic) == "table" and protectedTraffic.traffic or {}
+    })
+
+  if not nativeMapQueued and type(view.samples) == "table" then
+    for _, sample in pairs(view.samples) do
+      if type(sample) == "table" then
+        local worldX = centerX + (tonumber(sample.x) or 0)
+        local worldZ = centerZ + (tonumber(sample.z) or 0)
+        local sx, sy = car.mapProject(worldX, worldZ, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2, rotation)
+        if sx and sy then
+          local kind = tostring(sample.kind or "")
+          local color = colors.gray
+          if kind == "road" then color = colors.black
+          elseif kind == "crosswalk_marker" then color = colors.yellow
+          elseif kind == "crosswalk" then color = colors.white
+          elseif kind == "sidewalk" then color = colors.lightGray end
+          if sample.tunnel == true then color = ((sx + sy) % 2 == 0) and colors.gray or color end
+          fillRect(centerWin, sx, sy, 1, 1, color)
+          if kind == "road" or kind == "crosswalk" or kind == "crosswalk_marker" then
+            car.map.screenRoads[#car.map.screenRoads + 1] = {
+              screenX = layout.centerX + sx - 1,
+              screenY = sy,
+              x = worldX,
+              z = worldZ
+            }
+          end
+        end
+      end
+    end
+  end
+
+  if not nativeMapQueued and points and #points > 0 then
+    local previousX, previousY = nil, nil
+    for index = 1, #points do
+      local point = points[index]
+      local sx, sy = car.mapProject(tonumber(point.x) or 0, tonumber(point.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2, rotation)
+      if sx and sy then
+        if previousX then car.drawMapLine(previousX, previousY, sx, sy, colors.lightBlue) end
+        previousX, previousY = sx, sy
+      else
+        previousX, previousY = nil, nil
+      end
+    end
+  end
+
+  if not nativeMapQueued and type(ships) == "table" and type(ships.ships) == "table" then
+    for _, contact in pairs(ships.ships) do
+      if type(contact) == "table" then
+        local sx, sy = car.mapProject(tonumber(contact.x) or 0, tonumber(contact.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2, rotation)
+        if sx and sy then writeAt(centerWin, sx, sy, "V", colors.white, colors.orange) end
+      end
+    end
+  end
+  if not nativeMapQueued and type(protectedTraffic) == "table" and type(protectedTraffic.traffic) == "table" then
+    for _, contact in pairs(protectedTraffic.traffic) do
+      if type(contact) == "table" then
+        local sx, sy = car.mapProject(tonumber(contact.x) or 0, tonumber(contact.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2, rotation)
+        if sx and sy then writeAt(centerWin, sx, sy, "!", colors.white, colors.red) end
+      end
+    end
+  end
+
+  if not nativeMapQueued and car.map.destination then
+    local dx, dy = car.mapProject(car.map.destination.x, car.map.destination.z, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2, rotation)
+    if dx and dy then
+      fillRect(centerWin, dx, dy, 1, 1, colors.red)
+      writeAt(centerWin, dx, dy, "X", colors.white, colors.red)
+    end
+  end
+  if not nativeMapQueued and type(vehicle) == "table" then
+    local vx, vy = car.mapProject(tonumber(vehicle.x) or 0, tonumber(vehicle.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2, rotation)
+    if vx and vy then
+      local marker = "^"
+      local vehicleHeading = car.shipHeading()
+      if vehicleHeading then
+        local directionX, directionZ = math.cos(vehicleHeading), math.sin(vehicleHeading)
+        if math.abs(directionX) >= math.abs(directionZ) then marker = directionX >= 0 and ">" or "<"
+        else marker = directionZ >= 0 and "v" or "^" end
+      end
+      writeAt(centerWin, vx, vy, marker, colors.black, colors.lime)
+    end
+  end
+end
+
 function car.drawMap(y0)
   engineBox = nil
   actionBoxes = {}
@@ -3989,115 +4102,24 @@ function car.drawMap(y0)
     status = "AI " .. tostring(car.autopilot.status) .. "  " .. tostring(car.autopilot.selectedMode):upper()
       .. "  " .. fmt(car.autopilot.targetSpeed, 1) .. " b/s  STOP " .. fmt(car.autopilot.stoppingDistance, 1)
   elseif not status and car.map.autoPilotArmed then
-    status = car.map.destination and "AUTOPILOT ARMED - ROUTING" or "AUTOPILOT ARMED - TAP MAP"
+    status = "SET DESTINATION - TAP THE ROAD"
+  elseif not status and car.routePoints() then
+    status = "ROUTE READY - PRESS START"
   elseif not status and car.map.destination then
-    status = "DEST " .. math.floor(car.map.destination.x) .. "," .. math.floor(car.map.destination.z)
+    status = "DESTINATION SET - PRESS START"
   elseif not status and car.map.notice then
     status = car.map.notice
   elseif not status then
-    status = "TAP MAP TO PLACE DESTINATION"
+    status = "PRESS SET DEST, TAP MAP, THEN PRESS START"
   end
   local mapX1 = 1
-  local mapY1 = 1
+  local mapY1 = math.min(2, layout.h)
   local mapX2 = math.max(1, layout.centerW)
   local mapY2 = math.max(1, layout.h)
   fillRect(centerWin, mapX1, mapY1, mapX2 - mapX1 + 1, mapY2 - mapY1 + 1, colors.lightGray)
 
   if type(view) == "table" then
-    local center = view.center or {}
-    local centerX = tonumber(center.x) or 0
-    local centerZ = tonumber(center.z) or 0
-    local radius = tonumber(view.radius) or (car.map.zooms[car.map.zoomIndex] or 32)
-    car.map.viewport = {
-      x1 = layout.centerX + mapX1 - 1, y1 = mapY1,
-      x2 = layout.centerX + mapX2 - 1, y2 = mapY2,
-      localX1 = mapX1, localY1 = mapY1, localX2 = mapX2, localY2 = mapY2,
-      centerX = centerX, centerZ = centerZ, radius = radius
-    }
-
-    if type(view.samples) == "table" then
-      for _, sample in pairs(view.samples) do
-        if type(sample) == "table" then
-          local worldX = centerX + (tonumber(sample.x) or 0)
-          local worldZ = centerZ + (tonumber(sample.z) or 0)
-          local sx, sy = car.mapProject(worldX, worldZ, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-          if sx and sy then
-            local kind = tostring(sample.kind or "")
-            local color = colors.gray
-            if kind == "road" then color = colors.black
-            elseif kind == "crosswalk_marker" then color = colors.yellow
-            elseif kind == "crosswalk" then color = colors.white
-            elseif kind == "sidewalk" then color = colors.lightGray end
-            if sample.tunnel == true then color = ((sx + sy) % 2 == 0) and colors.gray or color end
-            fillRect(centerWin, sx, sy, 1, 1, color)
-            if kind == "road" or kind == "crosswalk" or kind == "crosswalk_marker" then
-              car.map.screenRoads[#car.map.screenRoads + 1] = {
-                screenX = layout.centerX + sx - 1,
-                screenY = sy,
-                x = worldX,
-                z = worldZ
-              }
-            end
-          end
-        end
-      end
-    end
-
-    local points = car.routePoints()
-    if points and #points > 0 then
-      local previousX, previousY = nil, nil
-      for index = 1, #points do
-        local point = points[index]
-        local sx, sy = car.mapProject(tonumber(point.x) or 0, tonumber(point.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-        if sx and sy then
-          if previousX then car.drawMapLine(previousX, previousY, sx, sy, colors.lightBlue) end
-          previousX, previousY = sx, sy
-        else
-          previousX, previousY = nil, nil
-        end
-      end
-    end
-
-    local ships = car.ai.perception.ships
-    if type(ships) == "table" and type(ships.ships) == "table" then
-      for _, contact in pairs(ships.ships) do
-        if type(contact) == "table" then
-          local sx, sy = car.mapProject(tonumber(contact.x) or 0, tonumber(contact.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-          if sx and sy then writeAt(centerWin, sx, sy, "V", colors.white, colors.orange) end
-        end
-      end
-    end
-    local protectedTraffic = car.ai.perception.traffic
-    if type(protectedTraffic) == "table" and type(protectedTraffic.traffic) == "table" then
-      for _, contact in pairs(protectedTraffic.traffic) do
-        if type(contact) == "table" then
-          local sx, sy = car.mapProject(tonumber(contact.x) or 0, tonumber(contact.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-          if sx and sy then writeAt(centerWin, sx, sy, "!", colors.white, colors.red) end
-        end
-      end
-    end
-
-    if car.map.destination then
-      local dx, dy = car.mapProject(car.map.destination.x, car.map.destination.z, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-      if dx and dy then
-        fillRect(centerWin, dx, dy, 1, 1, colors.red)
-        writeAt(centerWin, dx, dy, "X", colors.white, colors.red)
-      end
-    end
-    local vehicle = view.vehicle or (scan and scan.center)
-    if type(vehicle) == "table" then
-      local vx, vy = car.mapProject(tonumber(vehicle.x) or 0, tonumber(vehicle.z) or 0, centerX, centerZ, radius, mapX1, mapY1, mapX2, mapY2)
-      if vx and vy then
-        local marker = "^"
-        local heading = car.shipHeading()
-        if heading then
-          local directionX, directionZ = math.cos(heading), math.sin(heading)
-          if math.abs(directionX) >= math.abs(directionZ) then marker = directionX >= 0 and ">" or "<"
-          else marker = directionZ >= 0 and "v" or "^" end
-        end
-        writeAt(centerWin, vx, vy, marker, colors.black, colors.lime)
-      end
-    end
+    car.drawMapCanvas(view, scan, mapX1, mapY1, mapX2, mapY2)
   else
     car.map.viewport = nil
     centerText(centerWin, math.floor((mapY1 + mapY2) / 2), "Map unavailable", layout.centerW, colors.red, colors.lightGray)
@@ -4128,19 +4150,24 @@ function car.drawMap(y0)
   local autoY = 1
   local zoomY = autoY + buttonH + gap
   local centerY = zoomY + buttonH + gap
-  local upY = centerY + buttonH + gap
+  local rotationY = centerY + buttonH + gap
+  local upY = rotationY + buttonH + gap
   local directionsY = upY + buttonH + gap
   local splitGap = 1
   local halfW = math.max(1, math.floor((controlW - splitGap) / 2))
   local thirdW = math.max(1, math.floor((controlW - splitGap * 2) / 3))
   local rightThirdW = math.max(1, controlW - thirdW * 2 - splitGap * 2)
 
-  car.drawMapControl("autopilot", car.autopilot.enabled and "AUTO ON" or "AUTO", 1, autoY, controlW, buttonH,
+  local autopilotLabel = car.autopilot.enabled and "STOP"
+    or (car.map.destination and "START" or "SET DEST")
+  car.drawMapControl("autopilot", autopilotLabel, 1, autoY, controlW, buttonH,
     car.map.autoPilotArmed or car.autopilot.enabled)
   car.drawMapControl("zoom_out", "-", 1, zoomY, halfW, buttonH, false)
   car.drawMapControl("zoom_in", "+", halfW + splitGap + 1, zoomY,
     controlW - halfW - splitGap, buttonH, false)
   car.drawMapControl("recenter", "CENTER", 1, centerY, controlW, buttonH, false)
+  car.drawMapControl("rotation", car.map.rotationMode == "heading" and "FOLLOW" or "NORTH",
+    1, rotationY, controlW, buttonH, car.map.rotationMode == "heading")
   car.drawMapControl("pan_up", "^", 1, upY, controlW, buttonH, false)
   car.drawMapControl("pan_left", "<", 1, directionsY, thirdW, buttonH, false)
   car.drawMapControl("pan_down", "v", thirdW + splitGap + 1, directionsY, thirdW, buttonH, false)
@@ -4482,18 +4509,20 @@ local function handleClick(mx, my)
       elseif id == "zoom_in" then
         car.map.zoomIndex = math.max(1, car.map.zoomIndex - 1)
       elseif id == "pan_left" then
-        car.map.panX = car.map.panX - panStep
+        car.panMap(-1, 0, panStep)
       elseif id == "pan_right" then
-        car.map.panX = car.map.panX + panStep
+        car.panMap(1, 0, panStep)
       elseif id == "pan_up" then
-        car.map.panZ = car.map.panZ - panStep
+        car.panMap(0, -1, panStep)
       elseif id == "pan_down" then
-        car.map.panZ = car.map.panZ + panStep
+        car.panMap(0, 1, panStep)
       elseif id == "recenter" then
         car.map.panX = 0
         car.map.panZ = 0
+      elseif id == "rotation" then
+        car.map.rotationMode = car.map.rotationMode == "heading" and "north" or "heading"
       elseif id == "autopilot" then
-        car.safeSetAutopilot(not (car.map.autoPilotArmed or car.autopilot.enabled))
+        car.handleMapAutopilotControl()
         return true
       elseif id == "map_exit" then
         selectTabById("home")
@@ -4508,23 +4537,28 @@ local function handleClick(mx, my)
   end
   local viewport = car.map.viewport
   if viewport and hit(viewport, mx, my) then
-    local armed = car.map.autoPilotArmed or car.autopilot.enabled
     if car.autopilot.enabled then car.stopAutopilot("REROUTE") end
     local width = math.max(1, viewport.x2 - viewport.x1)
     local height = math.max(1, viewport.y2 - viewport.y1)
-    local worldX = viewport.centerX - viewport.radius + ((mx - viewport.x1) / width) * viewport.radius * 2
-    local worldZ = viewport.centerZ - viewport.radius + ((my - viewport.y1) / height) * viewport.radius * 2
+    local rotatedX = -viewport.radius + ((mx - viewport.x1) / width) * viewport.radius * 2
+    local rotatedZ = -viewport.radius + ((my - viewport.y1) / height) * viewport.radius * 2
+    local rotation = tonumber(viewport.rotation) or 0
+    local cosine = math.cos(rotation)
+    local sine = math.sin(rotation)
+    local worldX = viewport.centerX + rotatedX * cosine + rotatedZ * sine
+    local worldZ = viewport.centerZ - rotatedX * sine + rotatedZ * cosine
     car.map.destination = {
       x = math.floor(worldX + 0.5),
       z = math.floor(worldZ + 0.5)
     }
     car.map.lastRoute = -1e9
     car.map.route = nil
-    car.map.autoPilotArmed = armed
-    car.setMapFeedback(armed and "ROUTING TO NEAREST ROAD" or "DESTINATION SET", 5)
+    car.map.autoPilotArmed = false
+    car.setMapFeedback("BUILDING ROUTE", 5)
     car.markVehicleStateDirty()
-    if armed then car.safeSetAutopilot(true)
-    else car.safeUpdateMap(true) end
+    car.safeUpdateMap(true)
+    if car.routePoints() then car.setMapFeedback("ROUTE READY - PRESS START", 6)
+    else car.setMapFeedback("ROUTE UNAVAILABLE", 6) end
     return true
   end
   for id, box in pairs(car.driveBoxes) do
@@ -4798,7 +4832,7 @@ function car.handleKey(code, down, repeated)
   elseif fresh and (name == "enter" or name == "space") then
     local selectedTab = tabs and tabs[activeTab] or nil
     if selectedTab and selectedTab.id == "map" then
-      car.safeSetAutopilot(not (car.map.autoPilotArmed or car.autopilot.enabled))
+      car.handleMapAutopilotControl()
       return true
     end
     return false

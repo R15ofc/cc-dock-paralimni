@@ -80,7 +80,6 @@ local function wipe_old_os()
     end
   end
   if not remove_path(fs.combine("system", "update")) then return false end
-  if not remove_path(fs.combine("system", "road-map-cache.json")) then return false end
   if not clear_user_caches() then return false end
   return true
 end

@@ -42,6 +42,21 @@ return function(car, context)
   local compactFont
   local hdOverlays = {}
   local lastOverlaySignature = ""
+  local nativeMap
+  local lastNativeFrame = ""
+
+  local function configuredDensity()
+    local direct = tonumber(_G.ROADROVER_HD_DENSITY)
+    if direct then return direct end
+    local base = tostring(context.scriptDir or "")
+    local path = fs.combine(base ~= "" and base or ".", "system/display-density.txt")
+    if not fs.exists(path) or fs.isDir(path) then return 192 end
+    local handle = fs.open(path, "r")
+    if not handle then return 192 end
+    local value = tonumber(handle.readAll())
+    handle.close()
+    return value or 192
+  end
 
   do
     local base = tostring(context.scriptDir or "")
@@ -471,11 +486,11 @@ return function(car, context)
         local profileOK, profile = pcall(gpu.getHDProfile)
         if profileOK and type(profile) == "table" then hdProfile = profile end
       end
-      local requestedDensity = tonumber(_G.ROADROVER_HD_DENSITY) or 128
+      local requestedDensity = configuredDensity()
       local maximumDensity = hdProfile and tonumber(hdProfile.maximumPixelDensity) or requestedDensity
       local targetDensity = math.floor(math.max(64, math.min(requestedDensity, maximumDensity or requestedDensity)))
       if type(gpu.setSize) == "function" then
-        local candidates = { targetDensity, 96, 64 }
+        local candidates = { targetDensity, 160, 128, 96, 64 }
         local applied = false
         for index = 1, #candidates do
           local density = candidates[index]
@@ -538,6 +553,34 @@ return function(car, context)
 
   function car.clearHDOverlays()
     hdOverlays = {}
+    nativeMap = nil
+  end
+
+  function car.queueHDMap(win, x, y, width, height, data)
+    if not car.hd.ready or type(data) ~= "table" then return false end
+    local gpu = car.devices.gpu
+    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" then return false end
+    local originX, originY = 1, 1
+    if win and type(win.getPosition) == "function" then
+      local positionOK, windowX, windowY = pcall(win.getPosition)
+      if positionOK and tonumber(windowX) and tonumber(windowY) then
+        originX, originY = math.floor(windowX), math.floor(windowY)
+      end
+    end
+    local globalX = originX + math.floor(tonumber(x) or 1) - 1
+    local globalY = originY + math.floor(tonumber(y) or 1) - 1
+    nativeMap = data
+    nativeMap.x = cellPixelX(globalX) - 1
+    nativeMap.y = cellPixelY(globalY) - 1
+    nativeMap.width = math.max(1, math.min(
+      math.floor(tonumber(width) or 1) * terminalState.cellWidth,
+      car.hd.width - nativeMap.x
+    ))
+    nativeMap.height = math.max(1, math.min(
+      math.floor(tonumber(height) or 1) * terminalState.cellHeight,
+      car.hd.height - nativeMap.y
+    ))
+    return true
   end
 
   function car.queueHDRoundedButton(win, x, y, width, height, line1, line2, progress,
@@ -571,9 +614,66 @@ return function(car, context)
     return true
   end
 
+  local function buildNativeFrame()
+    local lines = {}
+    for y = 1, terminalState.height do
+      local line = terminalState.lines[y] or blankLine()
+      lines[y] = { text = line[1], foreground = line[2], background = line[3] }
+    end
+    local buttons = {}
+    for index = 1, #hdOverlays do
+      local overlay = hdOverlays[index]
+      buttons[index] = {
+        x = cellPixelX(overlay.x),
+        y = cellPixelY(overlay.y) - 1,
+        width = math.max(1, overlay.width * terminalState.cellWidth - 2),
+        height = math.max(1, overlay.height * terminalState.cellHeight - 1),
+        line1 = overlay.line1,
+        line2 = overlay.line2,
+        progress = overlay.progress,
+        activeBg = overlay.activeBg,
+        inactiveBg = overlay.inactiveBg,
+        activeFg = overlay.activeFg,
+        inactiveFg = overlay.inactiveFg
+      }
+    end
+    return {
+      cellWidth = terminalState.cellWidth,
+      cellHeight = terminalState.cellHeight,
+      fontSize = 8,
+      offsetX = terminalState.offsetX,
+      offsetY = terminalState.offsetY,
+      lines = lines,
+      map = nativeMap,
+      buttons = buttons
+    }
+  end
+
   function car.flushHD()
     if not car.hd.ready or not car.devices.gpu then return false end
     car.hd.error = nil
+    if type(car.devices.gpu.renderRoadRoverFrame) == "function"
+      and textutils and type(textutils.serializeJSON) == "function" then
+      local serializedOK, frame = pcall(textutils.serializeJSON, buildNativeFrame())
+      if serializedOK and type(frame) == "string" then
+        if frame == lastNativeFrame then
+          hdOverlays = {}
+          nativeMap = nil
+          return true
+        end
+        local renderOK, result = pcall(car.devices.gpu.renderRoadRoverFrame, frame)
+        if renderOK and result ~= false then
+          lastNativeFrame = frame
+          terminalState.dirty = false
+          hdOverlays = {}
+          nativeMap = nil
+          return true
+        end
+        car.hd.error = tostring(result)
+      elseif not serializedOK then
+        car.hd.error = tostring(frame)
+      end
+    end
     local signature = overlaySignature()
     local overlaysChanged = signature ~= lastOverlaySignature
     if overlaysChanged then
