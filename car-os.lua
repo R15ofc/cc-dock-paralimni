@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.10.0"
+local VERSION = _G.ROADROVER_VERSION or "2.11.0"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -3219,6 +3219,7 @@ local tabs = {
   { id = "map", title = "Map", label = "Map" },
   { id = "drive", title = "Drive", label = "Drive" },
   { id = "actions", title = "Vehicle", label = "Vehicle" },
+  { id = "music", title = "Music", label = "Music" },
   { id = "settings", title = "Settings", label = "Settings" },
 }
 local activeTab = 1
@@ -3425,12 +3426,12 @@ local function currentSpeedDisplay()
   return tostring(math.floor(speedVal + 0.5)), unitText
 end
 
-local function hdPageId(id)
+function car.hdPageId(id)
   if id == "actions" then return "vehicle" end
   return id or "home"
 end
 
-local function buildHDMapPayload()
+function car.buildHDMapPayload()
   local view = car.map.view
   if type(view) ~= "table" then return nil end
   local center = view.center or {}
@@ -3472,8 +3473,8 @@ local function buildHDMapPayload()
   }
 end
 
-local function buildHDDashboard(pageId)
-  pageId = hdPageId(pageId)
+function car.buildHDDashboard(pageId)
+  pageId = car.hdPageId(pageId)
   if car.ui.page ~= pageId then
     car.ui.page = pageId
     car.ui.pageTransition = 0
@@ -3488,7 +3489,7 @@ local function buildHDDashboard(pageId)
   local menu = {}
   for index = 1, #tabs do
     local tab = tabs[index]
-    local renderId = hdPageId(tab.id)
+    local renderId = car.hdPageId(tab.id)
     local active = renderId == pageId
     menu[#menu + 1] = {
       id = renderId,
@@ -3526,6 +3527,7 @@ local function buildHDDashboard(pageId)
   end
 
   local title = pageId:gsub("^%l", string.upper)
+  local music = car.music and car.music:snapshot() or nil
   return {
     page = pageId,
     pageTitle = title,
@@ -3543,13 +3545,15 @@ local function buildHDDashboard(pageId)
     activeMenu = pageId,
     menu = menu,
     controls = controls,
-    modes = modes
+    modes = modes,
+    music = music,
+    notification = music and music.notification or nil
   }
 end
 
-local function queueHDMapBackground()
+function car.queueHDMapBackground()
   if not (car.hd.ready and car.queueHDMap) then return false end
-  local payload = buildHDMapPayload()
+  local payload = car.buildHDMapPayload()
   if not payload then return false end
   return car.queueHDMap(nil, 1, 1, layout.w, layout.h, payload)
 end
@@ -3758,13 +3762,13 @@ local function drawHome(y0)
       }
     end
 
-    queueHDMapBackground()
-    local queued = car.queueHDDashboard(buildHDDashboard("home"))
+    car.queueHDMapBackground()
+    local queued = car.queueHDDashboard(car.buildHDDashboard("home"))
     if not queued then
       clearWin(centerWin, colors.white, colors.black)
       centerText(centerWin, math.max(2, math.floor(layout.h / 2) - 1), "NATIVE UI UPDATE REQUIRED",
         layout.centerW, colors.black, colors.white)
-      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1), "Tweaked Tweaks 1.11.0",
+      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1), "Tweaked Tweaks 1.12.0",
         layout.centerW, colors.gray, colors.white)
     end
     return
@@ -4097,6 +4101,92 @@ function car.drawDrive(y0)
   end
 end
 
+function car.drawMusic(y0)
+  actionBoxes = {}
+  settingsBoxes = {}
+  engineBox = nil
+  cruiseBox = nil
+  car.driveBoxes = {}
+  car.musicBoxes = {}
+
+  if not car.music then
+    centerText(centerWin, math.max(2, y0 + 2), "Music unavailable", layout.centerW,
+      colors.red, COLORS.bg)
+    return
+  end
+
+  local tracks = car.music:visibleTracks()
+  local perPage = 4
+  local pageCount = math.max(1, math.ceil(#tracks / perPage))
+  car.music.page = clamp(tonumber(car.music.page) or 1, 1, pageCount)
+  local margin = layout.hdCompact and math.min(9, math.max(2, math.floor(layout.centerW * 0.14))) or 2
+  local contentW = math.max(10, layout.centerW - margin - 2)
+  local gap = 1
+  local trackW = math.max(5, math.floor((contentW - gap) / 2))
+  local trackH = layout.h >= 16 and 3 or 2
+  local startY = math.max(y0 + 1, 3)
+
+  for slot = 1, perPage do
+    local position = (car.music.page - 1) * perPage + slot
+    local item = tracks[position]
+    if item then
+      local column = (slot - 1) % 2
+      local row = math.floor((slot - 1) / 2)
+      local x = margin + column * (trackW + gap)
+      local y = startY + row * (trackH + gap)
+      local width = column == 1 and math.max(1, contentW - trackW - gap) or trackW
+      local active = car.music.playing and car.music.currentIndex == item.index
+      local key = "music:track:" .. tostring(item.index)
+      car.drawAnimatedButton(centerWin, x, y, width, trackH, key,
+        item.track.title, trackH > 1 and item.track.artist or nil, active,
+        COLORS.activeBg, COLORS.panel)
+      car.musicBoxes[key] = {
+        x1 = layout.centerX + x - 1, y1 = y,
+        x2 = layout.centerX + x + width - 2, y2 = y + trackH - 1
+      }
+    end
+  end
+
+  local controls = {
+    { "previous", "Previous" },
+    { "play", car.music.playing and "Stop" or "Play" },
+    { "next", "Next" },
+    { "favourite", car.music.favourites[car.music:current().id] and "Favourited" or "Favourite" },
+    { "repeat", "Repeat " .. car.music.repeatMode:gsub("^%l", string.upper) },
+    { "page_previous", "Page -" },
+    { "page_next", "Page +" },
+    { "library", car.music.favouritesOnly and "All Music" or "Favourites" },
+    { "volume", "Volume " .. tostring(math.floor(car.music.volume * 100 + 0.5)) .. "%" },
+    { "engine_sound", car.music.engineSounds and "Engine Sound" or "Engine Muted" }
+  }
+  local controlTop = startY + trackH * 2 + gap * 2
+  local controlColumns = 5
+  local controlW = math.max(4, math.floor((contentW - gap * (controlColumns - 1)) / controlColumns))
+  local controlH = layout.h >= 16 and 2 or 1
+  for index = 1, #controls do
+    local control = controls[index]
+    local column = (index - 1) % controlColumns
+    local row = math.floor((index - 1) / controlColumns)
+    local x = margin + column * (controlW + gap)
+    local y = controlTop + row * (controlH + gap)
+    local width = column == controlColumns - 1
+      and math.max(1, contentW - (controlW + gap) * column) or controlW
+    if y <= layout.h then
+      local height = math.min(controlH, layout.h - y + 1)
+      local key = "music:" .. control[1]
+      local active = (control[1] == "favourite" and car.music.favourites[car.music:current().id])
+        or (control[1] == "library" and car.music.favouritesOnly)
+        or (control[1] == "engine_sound" and car.music.engineSounds)
+      car.drawAnimatedButton(centerWin, x, y, width, height, key, control[2], nil, active,
+        COLORS.activeBg, COLORS.panel)
+      car.musicBoxes[key] = {
+        x1 = layout.centerX + x - 1, y1 = y,
+        x2 = layout.centerX + x + width - 2, y2 = y + height - 1
+      }
+    end
+  end
+end
+
 function car.mapRotation()
   if car.map.rotationMode ~= "heading" then return 0 end
   local heading = car.shipHeading()
@@ -4180,7 +4270,7 @@ function car.drawMapCanvas(view, scan, mapX1, mapY1, mapX2, mapY2)
     perspective = car.hd.ready and true or false
   }
 
-  local mapPayload = buildHDMapPayload() or {
+  local mapPayload = car.buildHDMapPayload() or {
     centerX = centerX,
     centerZ = centerZ,
     radius = radius,
@@ -4317,7 +4407,7 @@ function car.drawMap(y0)
     centerText(centerWin, math.floor((mapY1 + mapY2) / 2), "Map unavailable", layout.centerW, colors.red, colors.lightGray)
   end
 
-  local controlW = math.min(9, math.max(7, math.floor(layout.centerW * 0.12)))
+  local controlW = math.min(14, math.max(11, math.floor(layout.centerW * 0.16)))
   local statusError = car.map.error and not feedbackActive
   local statusX = math.min(layout.centerW, controlW + 2)
   local statusW = math.max(1, layout.centerW - statusX + 1)
@@ -4338,9 +4428,10 @@ function car.drawMap(y0)
   end
 
   local buttonH = layout.h >= 18 and 2 or 1
+  local autoH = layout.h >= 18 and 3 or 2
   local gap = 1
   local autoY = 1
-  local zoomY = autoY + buttonH + gap
+  local zoomY = autoY + autoH + gap
   local centerY = zoomY + buttonH + gap
   local rotationY = centerY + buttonH + gap
   local upY = rotationY + buttonH + gap
@@ -4350,9 +4441,7 @@ function car.drawMap(y0)
   local thirdW = math.max(1, math.floor((controlW - splitGap * 2) / 3))
   local rightThirdW = math.max(1, controlW - thirdW * 2 - splitGap * 2)
 
-  local autopilotLabel = car.autopilot.enabled and "STOP"
-    or (car.map.destination and "START" or "SET DEST")
-  car.drawMapControl("autopilot", autopilotLabel, 1, autoY, controlW, buttonH,
+  car.drawMapControl("autopilot", "Auto Pilot", 1, autoY, controlW, autoH,
     car.map.autoPilotArmed or car.autopilot.enabled)
   car.drawMapControl("zoom_out", "-", 1, zoomY, halfW, buttonH, false)
   car.drawMapControl("zoom_in", "+", halfW + splitGap + 1, zoomY,
@@ -4368,7 +4457,7 @@ function car.drawMap(y0)
     math.max(directionsY + buttonH + gap, layout.h - buttonH + 1))
   car.drawMapControl("map_exit", "MENU", 1, exitY, controlW, buttonH, false)
   if car.hd.ready and car.queueHDDashboard then
-    car.queueHDDashboard(buildHDDashboard("map"))
+    car.queueHDDashboard(car.buildHDDashboard("map"))
   end
 end
 
@@ -4398,6 +4487,7 @@ end
 local function drawCenter()
   local tab = tabs[activeTab] or {}
   local id = tab.id or ""
+  car.musicBoxes = {}
   if id == "map" then
     mapWin.setVisible(true)
     centerWin.setVisible(false)
@@ -4462,14 +4552,16 @@ local function drawCenter()
     drawAbout(y0)
   elseif id == "actions" then
     drawActions(y0, viewId)
+  elseif id == "music" then
+    car.drawMusic(y0)
   elseif id == "settings" then
     drawSettings(y0)
   else
     drawComingSoon(y0)
   end
   if car.hd.ready and id ~= "home" and car.queueHDDashboard then
-    queueHDMapBackground()
-    car.queueHDDashboard(buildHDDashboard(id))
+    car.queueHDMapBackground()
+    car.queueHDDashboard(car.buildHDDashboard(id))
   end
 end
 
@@ -4601,6 +4693,22 @@ function car.loadHDRenderer()
 end
 
 car.loadHDRenderer()
+
+function car.loadMusic()
+  local modulePath = (SCRIPT_DIR ~= "" and fs.combine(SCRIPT_DIR, "roadrover-music.lua"))
+    or "roadrover-music.lua"
+  if not fs.exists(modulePath) then return false end
+  local loaded, attach = pcall(dofile, modulePath)
+  if not loaded or type(attach) ~= "function" then return false end
+  local attached = pcall(attach, car, {
+    userRoot = function() return USER_ROOT end,
+    readJson = readJson,
+    writeJson = writeJson
+  })
+  return attached and car.music ~= nil
+end
+
+car.loadMusic()
 
 local function hit(b, x, y)
   return b and x >= b.x1 and x <= b.x2 and y >= b.y1 and y <= b.y2
@@ -4774,6 +4882,35 @@ local function handleClick(mx, my)
   end
   for id, box in pairs(car.driveBoxes) do
     if hit(box, mx, my) then return car.handleDriveControl(id) end
+  end
+  for id, box in pairs(car.musicBoxes or {}) do
+    if hit(box, mx, my) and car.music then
+      local trackIndex = id:match("^music:track:(%d+)$")
+      if trackIndex then return car.music:play(tonumber(trackIndex)) end
+      if id == "music:previous" then return car.music:step(-1) end
+      if id == "music:play" then
+        if car.music.playing then return car.music:stop() end
+        return car.music:play(car.music.currentIndex)
+      end
+      if id == "music:next" then return car.music:step(1) end
+      if id == "music:favourite" then return car.music:toggleFavourite() end
+      if id == "music:repeat" then car.music:cycleRepeat(); return true end
+      if id == "music:library" then car.music:toggleFavouritesView(); return true end
+      if id == "music:volume" then car.music:cycleVolume(); return true end
+      if id == "music:engine_sound" then car.music:toggleEngineSounds(); return true end
+      if id == "music:page_previous" then
+        local pageCount = math.max(1, math.ceil(#car.music:visibleTracks() / 4))
+        car.music.page = car.music.page - 1
+        if car.music.page < 1 then car.music.page = pageCount end
+        return true
+      end
+      if id == "music:page_next" then
+        local pageCount = math.max(1, math.ceil(#car.music:visibleTracks() / 4))
+        car.music.page = car.music.page + 1
+        if car.music.page > pageCount then car.music.page = 1 end
+        return true
+      end
+    end
   end
   if quickMapBox and hit(quickMapBox, mx, my) then
     if selectTabById("map") then return true end
@@ -4984,6 +5121,7 @@ function car.updateHardware()
     car.lastBlink = now
   end
   car.applyOutputs()
+  if car.music then car.music:update() end
   car.flushVehicleState(false)
 end
 
@@ -5066,6 +5204,7 @@ function car.releaseKeys()
 end
 
 function car.safeShutdown()
+  if car.music then car.music:closeStream(true) end
   car.releaseShipLoad()
   car.saveMapCache(nil, true)
   car.flushVehicleState(true)
@@ -5137,6 +5276,7 @@ local function main()
   rebuildUI()
   redraw()
   ensureProfile()
+  if car.music then car.music:reload() end
   car.state.workshopEngineOff = true
   car.state.driveEngineOff = true
   car.engineOn = false
@@ -5215,8 +5355,13 @@ local function main()
       car.releaseKeys()
       redraw()
 
+    elseif ev == "speaker_audio_empty" then
+      if car.music then car.music:handleEvent(ev, a) end
+      redraw()
+
     elseif ev == "peripheral" or ev == "peripheral_detach" then
       car.scanDevices(true)
+      if car.music then car.music:handleEvent(ev, a) end
       if car.setupHD then car.setupHD(true) end
       car.applyOutputs()
       rebuildUI()

@@ -602,8 +602,8 @@ return function(car, context)
   function car.queueHDDashboard(data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" or (tonumber(car.hd.rendererApi) or 0) < 3 then
-      car.hd.error = "Tweaked Tweaks 1.11.0 renderer required"
+    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" or (tonumber(car.hd.rendererApi) or 0) < 4 then
+      car.hd.error = "Tweaked Tweaks 1.12.0 renderer required"
       return false
     end
     nativeDashboard = data
@@ -706,7 +706,7 @@ return function(car, context)
       end
     end
     return {
-      rendererApi = 3,
+      rendererApi = 4,
       cellWidth = terminalState.cellWidth,
       cellHeight = terminalState.cellHeight,
       fontSize = terminalState.fontSize,

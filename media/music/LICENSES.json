@@ -1,0 +1,66 @@
+{
+  "format": "mono 48000 Hz DFPWM",
+  "notice": "The source recordings keep their original licenses. Conversion does not change those licenses.",
+  "tracks": [
+    {
+      "file": "moonlight.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Moonlight_Sonata.ogg",
+      "license": "Public domain"
+    },
+    {
+      "file": "mozart.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Mozart_K525_Serenade_in_G_Major_1_-_Allegro.ogg",
+      "license": "Public domain"
+    },
+    {
+      "file": "bach-air.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Air_(Bach).ogg",
+      "license": "Public domain"
+    },
+    {
+      "file": "chopin-nocturne.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Chopin_Nocturne_Op_9_No_2.ogg",
+      "license": "CC BY-SA 3.0",
+      "credit": "Beeswaxcandle / Londonjackbooks"
+    },
+    {
+      "file": "vivaldi-spring.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Vivaldi_-_Four_Seasons_1_Spring_mvt_1_Allegro_-_John_Harrison_violin.oga",
+      "license": "CC BY-SA 4.0",
+      "credit": "John Harrison"
+    },
+    {
+      "file": "clair-de-lune.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Clair_de_lune_(Claude_Debussy)_Suite_bergamasque.ogg",
+      "license": "Public domain"
+    },
+    {
+      "file": "gymnopedie.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Gymnopedie_No._1..ogg",
+      "license": "CC0"
+    },
+    {
+      "file": "fur-elise.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:For_Elise_(F%C3%BCr_Elise)_Beethoven_JMC_Han.ogg",
+      "license": "CC BY-SA 4.0"
+    },
+    {
+      "file": "brahms-dance.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Johannes_Brahms_-_Ungarischer_Tanz_5_g-moll.ogg",
+      "license": "EFF OAL-1",
+      "credit": "OldakQuill"
+    },
+    {
+      "file": "pachelbel-canon.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:Pachelbel_-_Canon_in_D_major,_P._37_(Guitar).ogg",
+      "license": "CC BY-SA 4.0",
+      "credit": "Aitua"
+    },
+    {
+      "file": "engine-five-cylinder.dfpwm",
+      "source": "https://commons.wikimedia.org/wiki/File:5_cylinder_engine_sound.ogg",
+      "license": "CC BY-SA 4.0",
+      "credit": "Jonas Tittmann"
+    }
+  ]
+}
