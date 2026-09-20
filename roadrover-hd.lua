@@ -61,6 +61,25 @@ return function(car, context)
     return value
   end
 
+  local function configuredResolution()
+    local directWidth = tonumber(_G.ROADROVER_HD_WIDTH)
+    local directHeight = tonumber(_G.ROADROVER_HD_HEIGHT)
+    if directWidth and directHeight then return math.floor(directWidth), math.floor(directHeight) end
+    local base = tostring(context.scriptDir or "")
+    local path = fs.combine(base ~= "" and base or ".", "system/display-resolution.txt")
+    if fs.exists(path) and not fs.isDir(path) then
+      local handle = fs.open(path, "r")
+      if handle then
+        local value = handle.readAll() or ""
+        handle.close()
+        local width, height = value:match("(%d+)%s*[xX,%s]%s*(%d+)")
+        width, height = tonumber(width), tonumber(height)
+        if width and height then return math.floor(width), math.floor(height) end
+      end
+    end
+    return 3240, 1080
+  end
+
   do
     local base = tostring(context.scriptDir or "")
     local path = base ~= "" and fs.combine(base, "roadrover-font.lua") or "roadrover-font.lua"
@@ -489,10 +508,16 @@ return function(car, context)
         local profileOK, profile = pcall(gpu.getHDProfile)
         if profileOK and type(profile) == "table" then hdProfile = profile end
       end
+      local requestedWidth, requestedHeight = configuredResolution()
+      local resolutionApplied = false
+      if type(gpu.setResolution) == "function" then
+        local resolutionOK, result = pcall(gpu.setResolution, requestedWidth, requestedHeight)
+        resolutionApplied = resolutionOK and result ~= false
+      end
       local requestedDensity = configuredDensity()
       local maximumDensity = hdProfile and tonumber(hdProfile.maximumPixelDensity) or requestedDensity
       local targetDensity = math.floor(math.max(64, math.min(requestedDensity, maximumDensity or requestedDensity)))
-      if type(gpu.setSize) == "function" then
+      if not resolutionApplied and type(gpu.setSize) == "function" then
         local candidates = { targetDensity, 160, 128, 96, 64 }
         local applied = false
         for index = 1, #candidates do
@@ -526,11 +551,18 @@ return function(car, context)
       car.hd.error = tostring(setupError)
       return false
     end
-    car.hd.width = math.floor(detectedWidth)
-    car.hd.height = math.floor(detectedHeight)
+    car.hd.physicalWidth = math.floor(hdProfile and tonumber(hdProfile.physicalWidth) or detectedWidth)
+    car.hd.physicalHeight = math.floor(hdProfile and tonumber(hdProfile.physicalHeight) or detectedHeight)
+    car.hd.width = math.floor(hdProfile and tonumber(hdProfile.logicalWidth) or detectedWidth)
+    car.hd.height = math.floor(hdProfile and tonumber(hdProfile.logicalHeight) or detectedHeight)
     car.hd.profile = hdProfile
     car.hd.pixelDensity = hdProfile and tonumber(hdProfile.pixelDensity) or nil
     car.hd.rendererApi = hdProfile and tonumber(hdProfile.rendererApi) or 0
+    car.hd.outputScale = hdProfile and tonumber(hdProfile.outputScale) or 1
+    car.hd.outputScaleX = hdProfile and tonumber(hdProfile.outputScaleX) or car.hd.outputScale
+    car.hd.outputScaleY = hdProfile and tonumber(hdProfile.outputScaleY) or car.hd.outputScale
+    car.hd.outputOffsetX = hdProfile and tonumber(hdProfile.outputOffsetX) or 0
+    car.hd.outputOffsetY = hdProfile and tonumber(hdProfile.outputOffsetY) or 0
     car.hd.font = "ascii"
     local density = tonumber(car.hd.pixelDensity) or 192
     local uiScale = math.max(1, density / 192)
@@ -738,9 +770,14 @@ return function(car, context)
     if not pixelX or not pixelY then return nil, nil end
     if pixelX < 1 then pixelX = pixelX + 1 end
     if pixelY < 1 then pixelY = pixelY + 1 end
-    if pixelX > car.hd.width or pixelY > car.hd.height then return nil, nil end
-    local x = math.floor((pixelX - terminalState.offsetX) / terminalState.cellWidth) + 1
-    local y = math.floor((pixelY - terminalState.offsetY) / terminalState.cellHeight) + 1
+    if pixelX > (car.hd.physicalWidth or car.hd.width) or pixelY > (car.hd.physicalHeight or car.hd.height) then return nil, nil end
+    local scaleX = math.max(0.0001, tonumber(car.hd.outputScaleX) or 1)
+    local scaleY = math.max(0.0001, tonumber(car.hd.outputScaleY) or 1)
+    pixelX = (pixelX - (tonumber(car.hd.outputOffsetX) or 0)) / scaleX
+    pixelY = (pixelY - (tonumber(car.hd.outputOffsetY) or 0)) / scaleY
+    if pixelX < 0 or pixelY < 0 or pixelX >= car.hd.width or pixelY >= car.hd.height then return nil, nil end
+    local x = math.floor((pixelX + 1 - terminalState.offsetX) / terminalState.cellWidth) + 1
+    local y = math.floor((pixelY + 1 - terminalState.offsetY) / terminalState.cellHeight) + 1
     x = math.min(x, terminalState.width)
     y = math.min(y, terminalState.height)
     if x < 1 or y < 1 then return nil, nil end
