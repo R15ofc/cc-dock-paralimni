@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.9.5"
+local VERSION = _G.ROADROVER_VERSION or "2.10.0"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -128,6 +128,11 @@ local car = {
   animations = {
     values = {},
     presses = {}
+  },
+  ui = {
+    page = nil,
+    pageTransition = 1,
+    modeSlider = 0
   },
   map = {
     zooms = { 16, 32, 64, 128, 256 },
@@ -2664,7 +2669,7 @@ function car.drawAnimatedButton(win, x, y, w, h, key, line1, line2, active, acti
   local overlayWidth = math.floor(w * progress + 0.5)
   if car.queueHDRoundedButton
     and car.queueHDRoundedButton(win, x, y, w, h, line1, line2, progress,
-      activeBg, inactiveBg, activeFg, inactiveFg) then
+      activeBg, inactiveBg, activeFg, inactiveFg, key) then
     return
   end
   fillRect(win, x, y, w, h, inactiveBg)
@@ -3212,8 +3217,9 @@ end
 local tabs = {
   { id = "home", title = "Home", label = "Home" },
   { id = "map", title = "Map", label = "Map" },
-  { id = "settings", title = "Options", label = "Options" },
-  { id = "about", title = "About", label = "About" },
+  { id = "drive", title = "Drive", label = "Drive" },
+  { id = "actions", title = "Vehicle", label = "Vehicle" },
+  { id = "settings", title = "Settings", label = "Settings" },
 }
 local activeTab = 1
 local tabPage = (tabs[activeTab] and tabs[activeTab].page) or 1
@@ -3419,6 +3425,135 @@ local function currentSpeedDisplay()
   return tostring(math.floor(speedVal + 0.5)), unitText
 end
 
+local function hdPageId(id)
+  if id == "actions" then return "vehicle" end
+  return id or "home"
+end
+
+local function buildHDMapPayload()
+  local view = car.map.view
+  if type(view) ~= "table" then return nil end
+  local center = view.center or {}
+  local centerX = tonumber(center.x) or 0
+  local centerZ = tonumber(center.z) or 0
+  local radius = tonumber(view.radius) or (car.map.zooms[car.map.zoomIndex] or 32)
+  local route = car.routePoints() or {}
+  local vehicle = view.vehicle or (car.map.scan and car.map.scan.center)
+  local destination = car.map.destination
+  local heading = car.shipHeading() or 0
+  local vehicleX = type(vehicle) == "table" and tonumber(vehicle.x) or 0
+  local vehicleZ = type(vehicle) == "table" and tonumber(vehicle.z) or 0
+  local revision = table.concat({
+    tostring(car.map.cacheSignature or "map"),
+    tostring(car.map.zoomIndex),
+    string.format("%.3f", tonumber(car.mapRotation()) or 0),
+    string.format("%.1f", vehicleX or 0),
+    string.format("%.1f", vehicleZ or 0),
+    string.format("%.3f", heading),
+    tostring(type(destination) == "table" and destination.x or ""),
+    tostring(type(destination) == "table" and destination.z or ""),
+    tostring(#route)
+  }, ":")
+  local ships = car.ai.perception.ships
+  local traffic = car.ai.perception.traffic
+  return {
+    revision = revision,
+    centerX = centerX,
+    centerZ = centerZ,
+    radius = radius,
+    rotation = car.mapRotation(),
+    heading = heading,
+    samples = view.samples or {},
+    route = route,
+    destination = destination,
+    vehicle = vehicle,
+    ships = type(ships) == "table" and ships.ships or {},
+    traffic = type(traffic) == "table" and traffic.traffic or {}
+  }
+end
+
+local function buildHDDashboard(pageId)
+  pageId = hdPageId(pageId)
+  if car.ui.page ~= pageId then
+    car.ui.page = pageId
+    car.ui.pageTransition = 0
+  else
+    car.ui.pageTransition = car.approach(tonumber(car.ui.pageTransition) or 0, 1, 0.24)
+  end
+
+  local modeIndex = car.state.mode == "sport_plus" and 2 or (car.state.mode == "sport" and 1 or 0)
+  car.ui.modeSlider = car.approach(tonumber(car.ui.modeSlider) or modeIndex, modeIndex, 0.22)
+
+  local speedText, unitText = currentSpeedDisplay()
+  local menu = {}
+  for index = 1, #tabs do
+    local tab = tabs[index]
+    local renderId = hdPageId(tab.id)
+    local active = renderId == pageId
+    menu[#menu + 1] = {
+      id = renderId,
+      label = tab.label,
+      progress = car.animationProgress("nav:" .. renderId, active)
+    }
+  end
+
+  local controls = {}
+  local modes = {}
+  if pageId == "home" or pageId == "map" then
+    local controlsY = math.max(1, layout.h - 1)
+    controls = {
+      { id = "drive_engine", label = "Engine", x = 1, y = controlsY, width = 4, height = 2,
+        active = not car.state.driveEngineOff },
+      { id = "front_drive", label = car.state.frontDriveOff and "2WD" or "AWD", x = 5, y = controlsY,
+        width = 4, height = 2, active = not car.state.frontDriveOff },
+      { id = "cruise", label = "Auto", x = 9, y = controlsY, width = 4, height = 2,
+        active = car.cruiseOn },
+      { id = "headlights", label = "Lights", x = 13, y = controlsY, width = 4, height = 2,
+        active = car.state.lighting == "headlights" }
+    }
+    for index = 1, #controls do
+      local control = controls[index]
+      control.progress = car.animationProgress("home:" .. control.id, control.active)
+    end
+    modes = {
+      { id = "standard", label = "ST", x = 18, y = controlsY, width = 3, height = 2,
+        active = car.state.mode == "standard" },
+      { id = "sport", label = "S", x = 21, y = controlsY, width = 3, height = 2,
+        active = car.state.mode == "sport" },
+      { id = "sport_plus", label = "S+", x = 24, y = controlsY, width = 3, height = 2,
+        active = car.state.mode == "sport_plus" }
+    }
+  end
+
+  local title = pageId:gsub("^%l", string.upper)
+  return {
+    page = pageId,
+    pageTitle = title,
+    pageTransition = car.easeOutCubic(car.ui.pageTransition),
+    modeSlider = car.ui.modeSlider,
+    speed = speedText,
+    unit = unitText,
+    time = os.date("%H:%M"),
+    date = os.date("%d %b"):gsub("^0", ""),
+    rightX = layout.rightX,
+    rightWidth = layout.rightW,
+    menuStartY = 2,
+    menuHeight = 2,
+    menuGap = 1,
+    activeMenu = pageId,
+    menu = menu,
+    controls = controls,
+    modes = modes
+  }
+end
+
+local function queueHDMapBackground()
+  if not (car.hd.ready and car.queueHDMap) then return false end
+  local payload = buildHDMapPayload()
+  if not payload then return false end
+  return car.queueHDMap(nil, 1, 1, layout.w, layout.h, payload)
+end
+
 local function drawLeft()
   clearWin(leftWin, COLORS.bg, COLORS.fg)
 
@@ -3585,15 +3720,15 @@ end
 
 local function drawHome(y0)
   if car.hd.ready and car.queueHDDashboard then
-    local speedText, unitText = currentSpeedDisplay()
     local controlsY = math.max(1, layout.h - 1)
     local controls = {
-      { id = "drive_engine", label = "Eng", x = 1, y = controlsY, width = 3, height = 2,
+      { id = "drive_engine", x = 1, y = controlsY, width = 4, height = 2,
         active = not car.state.driveEngineOff },
-      { id = "front_drive", label = car.state.frontDriveOff and "2WD" or "AWD", x = 5, y = controlsY,
-        width = 3, height = 2, active = not car.state.frontDriveOff },
-      { id = "cruise", label = "Auto", x = 9, y = controlsY, width = 3, height = 2,
-        active = car.cruiseOn }
+      { id = "front_drive", x = 5, y = controlsY, width = 4, height = 2,
+        active = not car.state.frontDriveOff },
+      { id = "cruise", x = 9, y = controlsY, width = 4, height = 2, active = car.cruiseOn },
+      { id = "headlights", x = 13, y = controlsY, width = 4, height = 2,
+        active = car.state.lighting == "headlights" }
     }
     for index = 1, #controls do
       local control = controls[index]
@@ -3606,11 +3741,11 @@ local function drawHome(y0)
     end
 
     local modes = {
-      { id = "standard", label = "ST", x = 13, y = controlsY, width = 3, height = 2,
+      { id = "standard", x = 18, y = controlsY, width = 3, height = 2,
         active = car.state.mode == "standard" },
-      { id = "sport", label = "S", x = 16, y = controlsY, width = 3, height = 2,
+      { id = "sport", x = 21, y = controlsY, width = 3, height = 2,
         active = car.state.mode == "sport" },
-      { id = "sport_plus", label = "S+", x = 19, y = controlsY, width = 3, height = 2,
+      { id = "sport_plus", x = 24, y = controlsY, width = 3, height = 2,
         active = car.state.mode == "sport_plus" }
     }
     for index = 1, #modes do
@@ -3623,32 +3758,13 @@ local function drawHome(y0)
       }
     end
 
-    local dayNum = tonumber(os.date("%d")) or 0
-    local queued = car.queueHDDashboard({
-      speed = speedText,
-      unit = unitText,
-      time = os.date("%I:%M %p"):gsub("^0", ""),
-      date = string.format("%s %d %s", os.date("%a"), dayNum, os.date("%b")),
-      rightX = layout.rightX,
-      rightWidth = layout.rightW,
-      menuStartY = 1,
-      menuHeight = 2,
-      menuGap = 1,
-      activeMenu = (tabs[activeTab] and tabs[activeTab].id) or "home",
-      menu = {
-        { id = "home", label = "Home" },
-        { id = "map", label = "Map" },
-        { id = "settings", label = "Options" },
-        { id = "about", label = "About" }
-      },
-      controls = controls,
-      modes = modes
-    })
+    queueHDMapBackground()
+    local queued = car.queueHDDashboard(buildHDDashboard("home"))
     if not queued then
       clearWin(centerWin, colors.white, colors.black)
       centerText(centerWin, math.max(2, math.floor(layout.h / 2) - 1), "NATIVE UI UPDATE REQUIRED",
         layout.centerW, colors.black, colors.white)
-      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1), "Tweaked Tweaks 1.9.1",
+      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1), "Tweaked Tweaks 1.11.0",
         layout.centerW, colors.gray, colors.white)
     end
     return
@@ -4056,25 +4172,29 @@ function car.drawMapCanvas(view, scan, mapX1, mapY1, mapX2, mapY2)
   local vehicle = view.vehicle or (scan and scan.center)
   car.map.viewport = {
     x1 = layout.centerX + mapX1 - 1, y1 = mapY1,
-    x2 = layout.centerX + mapX2 - 1, y2 = mapY2,
+    x2 = car.hd.ready and math.max(layout.centerX + mapX1,
+      math.min(layout.centerX + mapX2 - 1, layout.rightX - 1)) or (layout.centerX + mapX2 - 1),
+    y2 = mapY2,
     localX1 = mapX1, localY1 = mapY1, localX2 = mapX2, localY2 = mapY2,
-    centerX = centerX, centerZ = centerZ, radius = radius, rotation = rotation
+    centerX = centerX, centerZ = centerZ, radius = radius, rotation = rotation,
+    perspective = car.hd.ready and true or false
   }
 
+  local mapPayload = buildHDMapPayload() or {
+    centerX = centerX,
+    centerZ = centerZ,
+    radius = radius,
+    rotation = rotation,
+    heading = heading,
+    samples = view.samples or {},
+    route = points or {},
+    destination = car.map.destination,
+    vehicle = vehicle,
+    ships = type(ships) == "table" and ships.ships or {},
+    traffic = type(protectedTraffic) == "table" and protectedTraffic.traffic or {}
+  }
   local nativeMapQueued = car.queueHDMap and car.queueHDMap(centerWin, mapX1, mapY1,
-    mapX2 - mapX1 + 1, mapY2 - mapY1 + 1, {
-      centerX = centerX,
-      centerZ = centerZ,
-      radius = radius,
-      rotation = rotation,
-      heading = heading,
-      samples = view.samples or {},
-      route = points or {},
-      destination = car.map.destination,
-      vehicle = vehicle,
-      ships = type(ships) == "table" and ships.ships or {},
-      traffic = type(protectedTraffic) == "table" and protectedTraffic.traffic or {}
-    })
+    mapX2 - mapX1 + 1, mapY2 - mapY1 + 1, mapPayload)
 
   if not nativeMapQueued and type(view.samples) == "table" then
     for _, sample in pairs(view.samples) do
@@ -4247,6 +4367,9 @@ function car.drawMap(y0)
   local exitY = math.min(layout.h - buttonH + 1,
     math.max(directionsY + buttonH + gap, layout.h - buttonH + 1))
   car.drawMapControl("map_exit", "MENU", 1, exitY, controlW, buttonH, false)
+  if car.hd.ready and car.queueHDDashboard then
+    car.queueHDDashboard(buildHDDashboard("map"))
+  end
 end
 
 function car.drawMapSafe(y0)
@@ -4344,6 +4467,10 @@ local function drawCenter()
   else
     drawComingSoon(y0)
   end
+  if car.hd.ready and id ~= "home" and car.queueHDDashboard then
+    queueHDMapBackground()
+    car.queueHDDashboard(buildHDDashboard(id))
+  end
 end
 
 local function drawRightTime()
@@ -4437,7 +4564,7 @@ redraw = function()
   drawLeft()
   drawCenter()
   local selected = tabs[activeTab] or {}
-  if selected.id ~= "map" then drawRight() end
+  if selected.id ~= "map" or car.hd.ready then drawRight() end
   if car.flushHD then car.flushHD() end
 end
 
@@ -4614,8 +4741,18 @@ local function handleClick(mx, my)
     if car.autopilot.enabled then car.stopAutopilot("REROUTE") end
     local width = math.max(1, viewport.x2 - viewport.x1)
     local height = math.max(1, viewport.y2 - viewport.y1)
-    local rotatedX = -viewport.radius + ((mx - viewport.x1) / width) * viewport.radius * 2
-    local rotatedZ = -viewport.radius + ((my - viewport.y1) / height) * viewport.radius * 2
+    local screenX = clamp((mx - viewport.x1) / width, 0, 1)
+    local screenY = clamp((my - viewport.y1) / height, 0, 1)
+    local rotatedX, rotatedZ
+    if viewport.perspective then
+      local normalizedY = screenY ^ (1 / 1.34)
+      local perspectiveScale = 0.52 + 0.76 * (normalizedY ^ 1.15)
+      rotatedX = ((screenX - 0.5) * 2 * viewport.radius) / math.max(0.01, perspectiveScale)
+      rotatedZ = -viewport.radius + normalizedY * viewport.radius * 2
+    else
+      rotatedX = -viewport.radius + screenX * viewport.radius * 2
+      rotatedZ = -viewport.radius + screenY * viewport.radius * 2
+    end
     local rotation = tonumber(viewport.rotation) or 0
     local cosine = math.cos(rotation)
     local sine = math.sin(rotation)

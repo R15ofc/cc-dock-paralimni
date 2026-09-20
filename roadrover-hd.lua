@@ -46,6 +46,7 @@ return function(car, context)
   local nativeMap
   local nativeDashboard
   local lastNativeFrame = ""
+  local lastMapRevision = nil
 
   local function configuredDensity()
     local direct = tonumber(_G.ROADROVER_HD_DENSITY)
@@ -213,7 +214,7 @@ return function(car, context)
         overlay.x, overlay.y, overlay.width, overlay.height,
         overlay.line1 or "", overlay.line2 or "",
         string.format("%.3f", tonumber(overlay.progress) or 0),
-        overlay.activeBg, overlay.inactiveBg, overlay.activeFg, overlay.inactiveFg
+        overlay.activeBg, overlay.inactiveBg, overlay.activeFg, overlay.inactiveFg, overlay.id or ""
       }, ":")
     end
     return table.concat(parts, "|")
@@ -577,6 +578,8 @@ return function(car, context)
     terminalState.cursorX = 1
     terminalState.cursorY = 1
     terminalState.renderedLines = {}
+    lastMapRevision = nil
+    lastNativeFrame = ""
     car.hd.gpuName = car.devices.gpuName
     car.hd.ready = type(gpu.filledRectangle) == "function" and type(gpu.drawText) == "function" and type(gpu.sync) == "function"
     car.hd.error = car.hd.ready and nil or "GPU drawing methods missing"
@@ -599,8 +602,8 @@ return function(car, context)
   function car.queueHDDashboard(data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" or (tonumber(car.hd.rendererApi) or 0) < 2 then
-      car.hd.error = "Tweaked Tweaks 1.9.1 renderer required"
+    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" or (tonumber(car.hd.rendererApi) or 0) < 3 then
+      car.hd.error = "Tweaked Tweaks 1.11.0 renderer required"
       return false
     end
     nativeDashboard = data
@@ -620,22 +623,30 @@ return function(car, context)
     end
     local globalX = originX + math.floor(tonumber(x) or 1) - 1
     local globalY = originY + math.floor(tonumber(y) or 1) - 1
-    nativeMap = data
-    nativeMap.x = cellPixelX(globalX) - 1
-    nativeMap.y = cellPixelY(globalY) - 1
-    nativeMap.width = math.max(1, math.min(
+    data.x = cellPixelX(globalX) - 1
+    data.y = cellPixelY(globalY) - 1
+    data.width = math.max(1, math.min(
       math.floor(tonumber(width) or 1) * terminalState.cellWidth,
-      car.hd.width - nativeMap.x
+      car.hd.width - data.x
     ))
-    nativeMap.height = math.max(1, math.min(
+    data.height = math.max(1, math.min(
       math.floor(tonumber(height) or 1) * terminalState.cellHeight,
-      car.hd.height - nativeMap.y
+      car.hd.height - data.y
     ))
+    local revision = table.concat({
+      tostring(data.revision or "uncached"), data.x, data.y, data.width, data.height
+    }, ":")
+    if data.revision ~= nil and revision == lastMapRevision then
+      nativeMap = nil
+    else
+      nativeMap = data
+      lastMapRevision = revision
+    end
     return true
   end
 
   function car.queueHDRoundedButton(win, x, y, width, height, line1, line2, progress,
-      activeBg, inactiveBg, activeFg, inactiveFg)
+      activeBg, inactiveBg, activeFg, inactiveFg, id)
     if not car.hd.ready then return false end
     local originX, originY = 1, 1
     if win and type(win.getPosition) == "function" then
@@ -660,36 +671,42 @@ return function(car, context)
       activeBg = tonumber(activeBg) or colors.white,
       inactiveBg = tonumber(inactiveBg) or colors.black,
       activeFg = tonumber(activeFg) or colors.black,
-      inactiveFg = tonumber(inactiveFg) or colors.white
+      inactiveFg = tonumber(inactiveFg) or colors.white,
+      id = tostring(id or "")
     }
     return true
   end
 
   local function buildNativeFrame()
     local lines = {}
-    for y = 1, terminalState.height do
-      local line = terminalState.lines[y] or blankLine()
-      lines[y] = { text = line[1], foreground = line[2], background = line[3] }
+    if not nativeDashboard then
+      for y = 1, terminalState.height do
+        local line = terminalState.lines[y] or blankLine()
+        lines[y] = { text = line[1], foreground = line[2], background = line[3] }
+      end
     end
     local buttons = {}
     for index = 1, #hdOverlays do
       local overlay = hdOverlays[index]
-      buttons[index] = {
-        x = cellPixelX(overlay.x),
-        y = cellPixelY(overlay.y) - 1,
-        width = math.max(1, overlay.width * terminalState.cellWidth - 2),
-        height = math.max(1, overlay.height * terminalState.cellHeight - 1),
-        line1 = overlay.line1,
-        line2 = overlay.line2,
-        progress = overlay.progress,
-        activeBg = overlay.activeBg,
-        inactiveBg = overlay.inactiveBg,
-        activeFg = overlay.activeFg,
-        inactiveFg = overlay.inactiveFg
-      }
+      if not nativeDashboard or not tostring(overlay.id or ""):find("^sidebar:") then
+        buttons[#buttons + 1] = {
+          x = cellPixelX(overlay.x),
+          y = cellPixelY(overlay.y) - 1,
+          width = math.max(1, overlay.width * terminalState.cellWidth - 2),
+          height = math.max(1, overlay.height * terminalState.cellHeight - 1),
+          line1 = overlay.line1,
+          line2 = overlay.line2,
+          progress = overlay.progress,
+          activeBg = overlay.activeBg,
+          inactiveBg = overlay.inactiveBg,
+          activeFg = overlay.activeFg,
+          inactiveFg = overlay.inactiveFg,
+          id = overlay.id
+        }
+      end
     end
     return {
-      rendererApi = 2,
+      rendererApi = 3,
       cellWidth = terminalState.cellWidth,
       cellHeight = terminalState.cellHeight,
       fontSize = terminalState.fontSize,
