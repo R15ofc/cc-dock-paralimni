@@ -32,6 +32,7 @@ return function(car, context)
     cellWidth = 6,
     cellHeight = 9,
     fontHeight = 8,
+    fontSize = 8,
     offsetX = 1,
     offsetY = 1,
     lines = {},
@@ -43,6 +44,7 @@ return function(car, context)
   local hdOverlays = {}
   local lastOverlaySignature = ""
   local nativeMap
+  local nativeDashboard
   local lastNativeFrame = ""
 
   local function configuredDensity()
@@ -50,12 +52,13 @@ return function(car, context)
     if direct then return direct end
     local base = tostring(context.scriptDir or "")
     local path = fs.combine(base ~= "" and base or ".", "system/display-density.txt")
-    if not fs.exists(path) or fs.isDir(path) then return 192 end
+    if not fs.exists(path) or fs.isDir(path) then return 1080 end
     local handle = fs.open(path, "r")
-    if not handle then return 192 end
+    if not handle then return 1080 end
     local value = tonumber(handle.readAll())
     handle.close()
-    return value or 192
+    if not value or value <= 256 then return 1080 end
+    return value
   end
 
   do
@@ -528,9 +531,12 @@ return function(car, context)
     car.hd.profile = hdProfile
     car.hd.pixelDensity = hdProfile and tonumber(hdProfile.pixelDensity) or nil
     car.hd.font = "ascii"
-    terminalState.cellWidth = 6
-    terminalState.cellHeight = 9
-    terminalState.fontHeight = 8
+    local density = tonumber(car.hd.pixelDensity) or 192
+    local uiScale = math.max(1, density / 192)
+    terminalState.cellWidth = math.max(6, math.floor(6 * uiScale + 0.5))
+    terminalState.cellHeight = math.max(9, math.floor(9 * uiScale + 0.5))
+    terminalState.fontHeight = math.max(8, math.floor(7 * uiScale + 0.5))
+    terminalState.fontSize = terminalState.fontHeight
     terminalState.width = math.max(1, math.floor(car.hd.width / terminalState.cellWidth))
     terminalState.height = math.max(1, math.floor(car.hd.height / terminalState.cellHeight))
     terminalState.offsetX = math.floor((car.hd.width - terminalState.width * terminalState.cellWidth) / 2) + 1
@@ -554,6 +560,15 @@ return function(car, context)
   function car.clearHDOverlays()
     hdOverlays = {}
     nativeMap = nil
+    nativeDashboard = nil
+  end
+
+  function car.queueHDDashboard(data)
+    if not car.hd.ready or type(data) ~= "table" then return false end
+    local gpu = car.devices.gpu
+    if not gpu or type(gpu.renderRoadRoverFrame) ~= "function" then return false end
+    nativeDashboard = data
+    return true
   end
 
   function car.queueHDMap(win, x, y, width, height, data)
@@ -640,11 +655,12 @@ return function(car, context)
     return {
       cellWidth = terminalState.cellWidth,
       cellHeight = terminalState.cellHeight,
-      fontSize = 8,
+      fontSize = terminalState.fontSize,
       offsetX = terminalState.offsetX,
       offsetY = terminalState.offsetY,
       lines = lines,
       map = nativeMap,
+      dashboard = nativeDashboard,
       buttons = buttons
     }
   end
@@ -659,6 +675,7 @@ return function(car, context)
         if frame == lastNativeFrame then
           hdOverlays = {}
           nativeMap = nil
+          nativeDashboard = nil
           return true
         end
         local renderOK, result = pcall(car.devices.gpu.renderRoadRoverFrame, frame)
@@ -667,6 +684,7 @@ return function(car, context)
           terminalState.dirty = false
           hdOverlays = {}
           nativeMap = nil
+          nativeDashboard = nil
           return true
         end
         car.hd.error = tostring(result)
@@ -686,6 +704,7 @@ return function(car, context)
       if not renderOverlays() then return false end
     end
     hdOverlays = {}
+    nativeDashboard = nil
     lastOverlaySignature = signature
     if not changed and not overlaysChanged then return true end
     local ok, err = pcall(car.devices.gpu.sync)

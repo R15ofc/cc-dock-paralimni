@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.9.2"
+local VERSION = _G.ROADROVER_VERSION or "2.9.3"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -2526,11 +2526,11 @@ local function rebuildUI()
   local leftW
   local rightW
   if hdDense then
-    leftW = 10
-    rightW = 9
+    leftW = 20
+    rightW = 12
   elseif hdCompact then
-    leftW = clamp(math.floor(w * 0.15), 11, 14)
-    rightW = clamp(math.floor(w * 0.15), 10, 14)
+    leftW = clamp(math.floor(w * 0.21), 16, 22)
+    rightW = clamp(math.floor(w * 0.126), 11, 13)
   else
     leftW = compact and clamp(math.floor(w * 0.25), 7, math.max(7, w - 12)) or math.floor(w / 3)
     rightW = compact and clamp(math.floor(w * 0.16), 5, math.max(5, w - leftW - 8))
@@ -3210,12 +3210,10 @@ local function wrap2(label, w)
 end
 
 local tabs = {
-  { id = "home", title = "Home", label = "Home", page = 1 },
-  { id = "settings", title = "Settings", label = "Settings", page = 1 },
-  { id = "stats", title = "Statistics", label = "Stats", page = 1 },
-  { id = "map", title = "Map", label = "Map", page = 2 },
-  { id = "about", title = "About", label = "About", page = 2 },
-  { id = "actions", title = "Quick Actions", label = "Actions", page = 2 },
+  { id = "home", title = "Home", label = "Home" },
+  { id = "map", title = "Map", label = "Map" },
+  { id = "settings", title = "Options", label = "Options" },
+  { id = "about", title = "About", label = "About" },
 }
 local activeTab = 1
 local tabPage = (tabs[activeTab] and tabs[activeTab].page) or 1
@@ -3407,6 +3405,20 @@ local function drawHomeCruiseAndEngine(l)
   end
 end
 
+local function currentSpeedDisplay()
+  local kmh = speedBps * 3.6
+  local speedVal = kmh
+  local unitText = "kmh"
+  if settings.units == "MP/H" then
+    speedVal = kmh * 0.621371
+    unitText = "mph"
+  elseif settings.units == "B/S" then
+    speedVal = speedBps
+    unitText = "bs"
+  end
+  return tostring(math.floor(speedVal + 0.5)), unitText
+end
+
 local function drawLeft()
   clearWin(leftWin, COLORS.bg, COLORS.fg)
 
@@ -3414,16 +3426,9 @@ local function drawLeft()
   local dateText = string.format("%s %d %s", os.date("%a"), dayNum, os.date("%b"))
   writeAt(leftWin, 1, 1, trim(dateText, layout.leftW), COLORS.fg, COLORS.bg)
 
-  local kmh = speedBps * 3.6
-  local speedVal = kmh
-  if settings.units == "MP/H" then
-    speedVal = kmh * 0.621371
-  elseif settings.units == "B/S" then
-    speedVal = speedBps
-  end
-  local num = tostring(math.floor(speedVal + 0.5))
+  local num, unitText = currentSpeedDisplay()
   local bf = loadBigFont()
-  local canBig = bf and type(bf.bigWrite) == "function" and bigTextWidth(num) <= layout.leftW
+  local canBig = not car.hd.ready and bf and type(bf.bigWrite) == "function" and bigTextWidth(num) <= layout.leftW
   local bw = canBig and bigTextWidth(num) or #num
   local bx = math.max(1, math.floor((layout.leftW - bw) / 2) + 1)
 
@@ -3437,9 +3442,6 @@ local function drawLeft()
     writeAt(leftWin, bx, by, num, COLORS.fg, COLORS.bg)
   end
 
-  local unitText = "kmh"
-  if settings.units == "MP/H" then unitText = "mph"
-  elseif settings.units == "B/S" then unitText = "bs" end
   local uy = by + bigH
   if uy < 1 then uy = 1 end
   if uy <= layout.h then
@@ -3582,6 +3584,69 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
 end
 
 local function drawHome(y0)
+  if car.hd.ready and car.queueHDDashboard then
+    local speedText, unitText = currentSpeedDisplay()
+    local controlsY = math.max(1, layout.h - 1)
+    local controls = {
+      { id = "drive_engine", label = "Eng", x = 1, y = controlsY, width = 3, height = 2,
+        active = not car.state.driveEngineOff },
+      { id = "front_drive", label = car.state.frontDriveOff and "2WD" or "AWD", x = 5, y = controlsY,
+        width = 3, height = 2, active = not car.state.frontDriveOff },
+      { id = "cruise", label = "Auto", x = 9, y = controlsY, width = 3, height = 2,
+        active = car.cruiseOn }
+    }
+    for index = 1, #controls do
+      local control = controls[index]
+      car.driveBoxes[control.id] = {
+        x1 = control.x,
+        y1 = control.y,
+        x2 = control.x + control.width - 1,
+        y2 = math.min(layout.h, control.y + control.height - 1)
+      }
+    end
+
+    local modes = {
+      { id = "standard", label = "ST", x = 13, y = controlsY, width = 3, height = 2,
+        active = car.state.mode == "standard" },
+      { id = "sport", label = "S", x = 16, y = controlsY, width = 3, height = 2,
+        active = car.state.mode == "sport" },
+      { id = "sport_plus", label = "S+", x = 19, y = controlsY, width = 3, height = 2,
+        active = car.state.mode == "sport_plus" }
+    }
+    for index = 1, #modes do
+      local mode = modes[index]
+      car.driveBoxes[mode.id] = {
+        x1 = mode.x,
+        y1 = controlsY,
+        x2 = mode.x + mode.width - 1,
+        y2 = layout.h
+      }
+    end
+
+    local dayNum = tonumber(os.date("%d")) or 0
+    car.queueHDDashboard({
+      speed = speedText,
+      unit = unitText,
+      time = os.date("%I:%M %p"):gsub("^0", ""),
+      date = string.format("%s %d %s", os.date("%a"), dayNum, os.date("%b")),
+      rightX = layout.rightX,
+      rightWidth = layout.rightW,
+      menuStartY = 1,
+      menuHeight = 2,
+      menuGap = 1,
+      activeMenu = (tabs[activeTab] and tabs[activeTab].id) or "home",
+      menu = {
+        { id = "home", label = "Home" },
+        { id = "map", label = "Map" },
+        { id = "settings", label = "Options" },
+        { id = "about", label = "About" }
+      },
+      controls = controls,
+      modes = modes
+    })
+    return
+  end
+
   local uname = displayUserName()
   if uname ~= "" then
     local label = "RRID: " .. uname
@@ -4283,15 +4348,17 @@ end
 local function computeRightLayout()
   local tabsX = 1
   local tabW = layout.rightW
-  local tabH = layout.hdCompact and 1 or 2
-  local startY = layout.hdCompact and 2 or 3
-  local pageH = layout.hdCompact and 0 or 2
+  local tabH = 2
+  local startY = layout.hdCompact and 1 or 3
+  local tabGap = layout.hdCompact and 1 or 0
+  local pageH = 0
   local pageY = pageH > 0 and math.max(2, layout.h - pageH + 1) or layout.h + 1
   local bottom = pageH > 0 and pageY - 1 or layout.h
   return {
     tabsX = tabsX,
     tabW = tabW,
     tabH = tabH,
+    tabGap = tabGap,
     startY = startY,
     pageH = pageH,
     pageY = pageY,
@@ -4311,7 +4378,7 @@ end
 
 local function drawRightTabs(pageTabs, l)
   for i = 1, #pageTabs do
-    local y = l.startY + (i - 1) * l.tabH
+    local y = l.startY + (i - 1) * (l.tabH + l.tabGap)
     if y + l.tabH - 1 > l.bottom then break end
 
     local t = pageTabs[i].tab
