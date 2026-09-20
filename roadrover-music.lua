@@ -1,5 +1,5 @@
 return function(car, context)
-  local MEDIA_RELEASE = "main"
+  local MEDIA_RELEASE = "9e05ee129d8299bfc623f09224baf61ba0d1c313"
   local MEDIA_BASE = "https://raw.githubusercontent.com/R15ofc/cc-dock-paralimni/"
     .. MEDIA_RELEASE .. "/media/music/"
   local BUFFER_SIZE = 16 * 1024
