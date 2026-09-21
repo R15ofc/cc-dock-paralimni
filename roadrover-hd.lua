@@ -42,6 +42,8 @@ return function(car, context)
   local gpuTerminal
   local compactFont
   local sceneBuilder
+  local sceneBuilderError
+  local lastNativeError
   local hdOverlays = {}
   local lastOverlaySignature = ""
   local nativeMap
@@ -91,14 +93,35 @@ return function(car, context)
     end
   end
 
-  do
+  local function loadSceneBuilder()
+    if sceneBuilder then return true end
     local base = tostring(context.scriptDir or "")
-    local path = base ~= "" and fs.combine(base, "roadrover-scene.lua") or "roadrover-scene.lua"
-    if fs.exists(path) then
-      local loaded, builder = pcall(dofile, path)
-      if loaded and type(builder) == "function" then sceneBuilder = builder end
+    local candidates = {
+      base ~= "" and fs.combine(base, "roadrover-scene.lua") or "roadrover-scene.lua",
+      "roadrover-scene.lua"
+    }
+    local checked = {}
+    sceneBuilderError = "roadrover-scene.lua missing"
+    for index = 1, #candidates do
+      local path = candidates[index]
+      if not checked[path] then
+        checked[path] = true
+        if fs.exists(path) and not fs.isDir(path) then
+          local loaded, builder = pcall(dofile, path)
+          if loaded and type(builder) == "function" then
+            sceneBuilder = builder
+            sceneBuilderError = nil
+            return true
+          end
+          sceneBuilderError = loaded
+            and ("roadrover-scene.lua returned " .. type(builder))
+            or tostring(builder)
+        end
+      end
     end
+    return false
   end
+  loadSceneBuilder()
 
   for color, rgb in pairs(COLOR_RGB) do terminalState.palette[color] = rgb end
 
@@ -609,14 +632,23 @@ return function(car, context)
     nativeDashboard = nil
   end
 
+  local function nativeFailure(message)
+    message = tostring(message or "Native renderer unavailable")
+    car.hd.error = message
+    if message ~= lastNativeError and car.writeHDError then pcall(car.writeHDError, message) end
+    lastNativeError = message
+    return false
+  end
+
   function car.queueHDDashboard(data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderScene) ~= "function" or not sceneBuilder
-      or (tonumber(car.hd.rendererApi) or 0) < 5 then
-      car.hd.error = "Tweaked Tweaks 1.13.0 scene API required"
-      return false
+    if not gpu then return nativeFailure("GPU peripheral missing") end
+    if type(gpu.renderScene) ~= "function" then
+      return nativeFailure("GPU renderScene missing; restart server with Tweaked Tweaks 1.13.0")
     end
+    if not loadSceneBuilder() then return nativeFailure(sceneBuilderError) end
+    lastNativeError = nil
     nativeDashboard = data
     return true
   end
@@ -624,7 +656,7 @@ return function(car, context)
   function car.queueHDMap(win, x, y, width, height, data)
     if not car.hd.ready or type(data) ~= "table" then return false end
     local gpu = car.devices.gpu
-    if not gpu or type(gpu.renderScene) ~= "function" or not sceneBuilder then return false end
+    if not gpu or type(gpu.renderScene) ~= "function" or not loadSceneBuilder() then return false end
     local originX, originY = 1, 1
     if win and type(win.getPosition) == "function" then
       local positionOK, windowX, windowY = pcall(win.getPosition)
@@ -728,7 +760,7 @@ return function(car, context)
   function car.flushHD()
     if not car.hd.ready or not car.devices.gpu then return false end
     car.hd.error = nil
-    if type(car.devices.gpu.renderScene) == "function" and sceneBuilder
+    if type(car.devices.gpu.renderScene) == "function" and loadSceneBuilder()
       and textutils and type(textutils.serializeJSON) == "function" then
       local expectedDashboard = nativeDashboard ~= nil
       local sceneOK, scene = pcall(sceneBuilder, buildNativeFrame(), car.hd.width, car.hd.height)

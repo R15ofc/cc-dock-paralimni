@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.12.1"
+local VERSION = _G.ROADROVER_VERSION or "2.12.2"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -3766,9 +3766,10 @@ local function drawHome(y0)
     local queued = car.queueHDDashboard(car.buildHDDashboard("home"))
     if not queued then
       clearWin(centerWin, colors.white, colors.black)
-      centerText(centerWin, math.max(2, math.floor(layout.h / 2) - 1), "NATIVE UI UPDATE REQUIRED",
+      centerText(centerWin, math.max(2, math.floor(layout.h / 2) - 1), "NATIVE UI UNAVAILABLE",
         layout.centerW, colors.black, colors.white)
-      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1), "Tweaked Tweaks 1.13.0",
+      centerText(centerWin, math.max(3, math.floor(layout.h / 2) + 1),
+        trim(tostring(car.hd.error or "Unknown renderer error"), layout.centerW),
         layout.centerW, colors.gray, colors.white)
     end
     return
