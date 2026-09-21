@@ -4,6 +4,65 @@ return function(car, context)
     .. MEDIA_RELEASE .. "/media/music/"
   local BUFFER_SIZE = 16 * 1024
 
+  local function makeFallbackDecoder()
+    local charge, strength, previousBit = 0, 0, false
+    local lowPassCharge, previousCharge, previousOutputBit = 0, 0, false
+    local precision = 1024
+    local minimumStrength = 8
+
+    local function predict(currentBit)
+      local target = currentBit and 127 or -128
+      local nextCharge = charge + math.floor((strength * (target - charge) + 512) / precision)
+      if nextCharge == charge and nextCharge ~= target then
+        nextCharge = nextCharge + (currentBit and 1 or -1)
+      end
+      local targetStrength = currentBit == previousBit and precision - 1 or 0
+      local nextStrength = strength
+      if nextStrength ~= targetStrength then
+        nextStrength = nextStrength + (currentBit == previousBit and 1 or -1)
+      end
+      if nextStrength < minimumStrength then nextStrength = minimumStrength end
+      charge, strength, previousBit = nextCharge, nextStrength, currentBit
+      return charge
+    end
+
+    return function(input)
+      if type(input) ~= "string" then error("DFPWM input must be a string", 2) end
+      local output, outputSize = {}, 0
+      for index = 1, #input do
+        local inputByte = string.byte(input, index)
+        for _ = 1, 8 do
+          local currentBit = bit32.band(inputByte, 1) ~= 0
+          local nextCharge = predict(currentBit)
+          local antijerk = nextCharge
+          if currentBit ~= previousOutputBit then
+            antijerk = math.floor((nextCharge + previousCharge + 1) / 2)
+          end
+          previousCharge, previousOutputBit = nextCharge, currentBit
+          lowPassCharge = lowPassCharge + math.floor(((antijerk - lowPassCharge) * 140 + 128) / 256)
+          outputSize = outputSize + 1
+          output[outputSize] = lowPassCharge
+          inputByte = bit32.arshift(inputByte, 1)
+        end
+      end
+      return output
+    end
+  end
+
+  local function createDecoder()
+    if type(require) == "function" then
+      local decoderOK, dfpwm = pcall(require, "cc.audio.dfpwm")
+      if decoderOK and type(dfpwm) == "table" and type(dfpwm.make_decoder) == "function" then
+        local makeOK, decoder = pcall(dfpwm.make_decoder)
+        if makeOK and type(decoder) == "function" then return decoder end
+      end
+    end
+    if bit32 and type(bit32.band) == "function" and type(bit32.arshift) == "function" then
+      return makeFallbackDecoder()
+    end
+    return nil
+  end
+
   local catalog = {
     { id = "moonlight", title = "Moonlight Sonata", artist = "Ludwig van Beethoven",
       duration = 306.672, file = "moonlight.dfpwm" },
@@ -207,8 +266,8 @@ return function(car, context)
       notify("Music", self.error)
       return false
     end
-    local decoderOK, dfpwm = pcall(require, "cc.audio.dfpwm")
-    if not decoderOK or type(dfpwm) ~= "table" or type(dfpwm.make_decoder) ~= "function" then
+    local decoder = createDecoder()
+    if not decoder then
       self.error = "DFPWM decoder unavailable"
       notify("Music", self.error)
       return false
@@ -222,7 +281,7 @@ return function(car, context)
       return false
     end
     self.handle = response
-    self.decoder = dfpwm.make_decoder()
+    self.decoder = decoder
     self.sourceType = sourceType
     self.playing = sourceType == "music"
     self.startedAt = os.clock()

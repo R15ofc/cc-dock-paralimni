@@ -18,7 +18,7 @@ local ENGINE_SIDE = BASE_ENGINE_SIDE
 local DRIVE_SIDE = BASE_DRIVE_SIDE
 local TEXT_SCALE = 0.5
 local PULSE_SEC = 0.18
-local VERSION = _G.ROADROVER_VERSION or "2.12.3"
+local VERSION = _G.ROADROVER_VERSION or "2.12.4"
 local RRID_MIN = 3
 local RRID_MAX = 10
 local SPEED_Y_OFFSET = 2
@@ -132,7 +132,11 @@ local car = {
   ui = {
     page = nil,
     pageTransition = 1,
-    modeSlider = 0
+    modeSlider = 0,
+    driveCategoryIndex = 1,
+    driveScrollOffset = 0,
+    driveVisibleSlots = 1,
+    driveColumns = 1
   },
   map = {
     zooms = { 16, 32, 64, 128, 256 },
@@ -1371,6 +1375,26 @@ function car.buildMapView(position)
   return true
 end
 
+function car.updateMapPosition(position)
+  if type(position) ~= "table" then return false end
+  local vehicleX = tonumber(position.x)
+  local vehicleY = tonumber(position.y) or 0
+  local vehicleZ = tonumber(position.z)
+  if not vehicleX or not vehicleZ then return false end
+  local view = car.map.view
+  if type(view) ~= "table" then return car.buildMapView(position) end
+  view.vehicle = { x = vehicleX, y = vehicleY, z = vehicleZ }
+  local center = view.center or {}
+  local targetX = vehicleX + (tonumber(car.map.panX) or 0)
+  local targetZ = vehicleZ + (tonumber(car.map.panZ) or 0)
+  local threshold = math.max(2, tonumber(view.step) or 1)
+  if math.abs((tonumber(center.x) or targetX) - targetX) >= threshold
+    or math.abs((tonumber(center.z) or targetZ) - targetZ) >= threshold then
+    return car.buildMapView(position)
+  end
+  return true
+end
+
 function car.loadMapCache()
   if car.map.cacheLoaded then return car.map.memory.count > 0 end
   car.map.cacheLoaded = true
@@ -1420,15 +1444,26 @@ function car.saveMapCache(view, force)
 end
 
 function car.ensureMapFallback()
-  if car.map.view then return true end
-  if car.loadMapCache() then return true end
+  if car.map.view then
+    car.map.notice = "USING SAVED MAP"
+    car.map.error = nil
+    car.map.errorDetail = nil
+    return true
+  end
+  car.loadMapCache()
   local position = curPos or car.vehicleWorldPosition()
   if type(position) ~= "table" then return false end
   local x = tonumber(position.x)
   local y = tonumber(position.y) or 0
   local z = tonumber(position.z)
   if not x or not z then return false end
-  return car.buildMapView({ x = x, y = y, z = z })
+  local built = car.buildMapView({ x = x, y = y, z = z })
+  if built then
+    car.map.notice = "USING SAVED MAP"
+    car.map.error = nil
+    car.map.errorDetail = nil
+  end
+  return built
 end
 
 function car.callTelemetry(method, ...)
@@ -1579,7 +1614,7 @@ function car.updateRoute(force, avoid)
     if route.available == true then
       car.map.route = route
       car.map.error = nil
-      car.setMapFeedback("ROUTE READY - PRESS START", 4)
+      car.setMapFeedback("ROUTE READY - PRESS AUTO", 4)
       return true
     end
     if not (type(avoid) == "table" and car.routePoints()) then car.map.route = route end
@@ -3218,9 +3253,14 @@ local tabs = {
   { id = "home", title = "Home", label = "Home" },
   { id = "map", title = "Map", label = "Map" },
   { id = "drive", title = "Drive", label = "Drive" },
-  { id = "actions", title = "Vehicle", label = "Vehicle" },
   { id = "music", title = "Music", label = "Music" },
   { id = "settings", title = "Settings", label = "Settings" },
+}
+car.driveCategories = {
+  { id = "driving", label = "Driving" },
+  { id = "power", label = "Power" },
+  { id = "chassis", label = "Chassis" },
+  { id = "lighting", label = "Lighting" }
 }
 local activeTab = 1
 local tabPage = (tabs[activeTab] and tabs[activeTab].page) or 1
@@ -3427,7 +3467,6 @@ local function currentSpeedDisplay()
 end
 
 function car.hdPageId(id)
-  if id == "actions" then return "vehicle" end
   return id or "home"
 end
 
@@ -3507,8 +3546,8 @@ function car.buildHDDashboard(pageId)
         active = not car.state.driveEngineOff },
       { id = "front_drive", label = car.state.frontDriveOff and "2WD" or "AWD", x = 5, y = controlsY,
         width = 4, height = 2, active = not car.state.frontDriveOff },
-      { id = "cruise", label = "Auto", x = 9, y = controlsY, width = 4, height = 2,
-        active = car.cruiseOn },
+      { id = "autopilot", label = "Auto", x = 9, y = controlsY, width = 4, height = 2,
+        active = car.autopilot.enabled or car.map.autoPilotArmed },
       { id = "headlights", label = "Lights", x = 13, y = controlsY, width = 4, height = 2,
         active = car.state.lighting == "headlights" }
     }
@@ -3527,6 +3566,10 @@ function car.buildHDDashboard(pageId)
   end
 
   local title = pageId:gsub("^%l", string.upper)
+  if pageId == "drive" then
+    local category = car.driveCategories[clamp(tonumber(car.ui.driveCategoryIndex) or 1, 1, #car.driveCategories)]
+    if category then title = "Drive · " .. category.label end
+  end
   local music = car.music and car.music:snapshot() or nil
   return {
     page = pageId,
@@ -3693,7 +3736,8 @@ function car.drawHomeControls(top, availableH, controlsX, controlsW)
   local controls = {
     { id = "work_engine", title = "SHOP", status = car.state.workshopEngineOff and "OFF" or "ON", active = car.state.workshopEngineOff },
     { id = "drive_engine", title = "DRIVE", status = car.state.driveEngineOff and "OFF" or "ON", active = car.state.driveEngineOff },
-    { id = "cruise", title = "CRUISE", status = car.cruiseOn and "ON" or "OFF", active = car.cruiseOn },
+    { id = "autopilot", title = "AUTO", status = car.autopilot.enabled and "ON" or "OFF",
+      active = car.autopilot.enabled or car.map.autoPilotArmed },
     { id = "front_drive", title = "TRACTION", status = car.state.frontDriveOff and "2WD" or "AWD", active = not car.state.frontDriveOff },
     { id = "boost", title = "BOOST", status = car.state.workshopBoost and "ON" or "OFF", active = car.state.workshopBoost },
     { id = "headlights", title = "LIGHTS", status = car.state.lighting == "headlights" and "ON" or "OFF", active = car.state.lighting == "headlights" },
@@ -3730,7 +3774,8 @@ local function drawHome(y0)
         active = not car.state.driveEngineOff },
       { id = "front_drive", x = 5, y = controlsY, width = 4, height = 2,
         active = not car.state.frontDriveOff },
-      { id = "cruise", x = 9, y = controlsY, width = 4, height = 2, active = car.cruiseOn },
+      { id = "autopilot", x = 9, y = controlsY, width = 4, height = 2,
+        active = car.autopilot.enabled or car.map.autoPilotArmed },
       { id = "headlights", x = 13, y = controlsY, width = 4, height = 2,
         active = car.state.lighting == "headlights" }
     }
@@ -4027,79 +4072,96 @@ function car.drawDrive(y0)
   cruiseBox = nil
   car.driveBoxes = {}
 
-  local margin = 1
-  local gapX = 1
-  local gapY = 1
-  local columns = layout.hdCompact and (layout.centerW >= 64 and 5 or 4) or 3
-  local buttonH = 2
-  local availableH = layout.h - y0 + 1
-  if availableH < 16 then
-    buttonH = 1
-    gapY = 1
-  end
-  local buttonW = math.floor((layout.centerW - margin * 2 - gapX * (columns - 1)) / columns)
-  if buttonW < 4 then buttonW = 4 end
+  local categoryIndex = clamp(tonumber(car.ui.driveCategoryIndex) or 1, 1, #car.driveCategories)
+  car.ui.driveCategoryIndex = categoryIndex
+  local groups = {
+    driving = {
+      { "standard", "Standard", "Comfort mode", car.state.mode == "standard", colors.lightBlue },
+      { "sport", "Sport", "Fast response", car.state.mode == "sport", colors.orange },
+      { "sport_plus", "Sport+", "Maximum response", car.state.mode == "sport_plus", colors.red },
+      { "cruise", "Cruise", car.cruiseOn and "Enabled" or "Disabled", car.cruiseOn, colors.lime },
+      { "clutch", "Clutch", car.state.clutch and "Engaged" or "Released", car.state.clutch, colors.lime },
+      { "reverse", "Reverse", car.state.reverse and "Selected" or "Off", car.state.reverse, colors.orange }
+    },
+    power = {
+      { "drive_engine", "Drive engine", car.state.driveEngineOff and "Stopped" or "Running", not car.state.driveEngineOff, colors.lime },
+      { "work_engine", "Workshop engine", car.state.workshopEngineOff and "Stopped" or "Running", not car.state.workshopEngineOff, colors.lime },
+      { "boost", "Workshop boost", car.state.workshopBoost and "Enabled" or "Disabled", car.state.workshopBoost, colors.orange },
+      { "front_drive", "Drivetrain", car.state.frontDriveOff and "2WD" or "AWD", not car.state.frontDriveOff, colors.lightBlue }
+    },
+    chassis = {
+      { "suspension_up", "Raise suspension", "Hold", car.state.suspension == "up", colors.lightBlue },
+      { "suspension_down", "Lower suspension", "Hold", car.state.suspension == "down", colors.lightBlue },
+      { "heading", "Port heading", tostring(car.state.portHeading or "north"):upper(), false, colors.lightBlue }
+    },
+    lighting = {
+      { "headlights", "Headlights", car.state.lighting == "headlights" and "On" or "Off", car.state.lighting == "headlights", colors.lightBlue },
+      { "left", "Left signal", "Z", car.state.lighting == "left", colors.yellow },
+      { "right", "Right signal", "C", car.state.lighting == "right", colors.yellow },
+      { "hazard", "Hazard lights", "X", car.state.lighting == "hazard", colors.red }
+    }
+  }
 
-  local function addControl(id, column, row, title, status, active, accent)
-    local x = margin + 1 + (column - 1) * (buttonW + gapX)
-    local y = y0 + (row - 1) * (buttonH + gapY)
-    local width = column == columns and layout.centerW - x - margin + 1 or buttonW
-    if y > layout.h or width < 1 then return end
-    local height = math.min(buttonH, layout.h - y + 1)
-    local line1, line2 = wrap2(title, math.max(1, width - 2))
-    if height == 1 then
-      local label = trim(line1 .. (status and (" " .. status) or ""), width)
-      car.drawAnimatedButton(centerWin, x, y, width, height, "drive:" .. id, label, nil, active, accent or colors.lime, COLORS.panel)
-    else
-      local label1 = trim(line1, width)
-      local label2 = trim(status or line2 or "", width)
-      car.drawAnimatedButton(centerWin, x, y, width, height, "drive:" .. id, label1, label2, active, accent or colors.lime, COLORS.panel)
-    end
-    car.driveBoxes[id] = {
-      x1 = layout.centerX + x - 1,
-      y1 = y,
-      x2 = layout.centerX + x + width - 2,
-      y2 = y + height - 1
+  local categoryGap = 1
+  local categoryH = layout.h >= 16 and 2 or 1
+  local categoryW = math.max(3, math.floor((layout.centerW - (#car.driveCategories - 1) * categoryGap) / #car.driveCategories))
+  for index = 1, #car.driveCategories do
+    local category = car.driveCategories[index]
+    local x = 1 + (index - 1) * (categoryW + categoryGap)
+    local width = index == #car.driveCategories and layout.centerW - x + 1 or categoryW
+    local active = index == categoryIndex
+    car.drawAnimatedButton(centerWin, x, y0, width, categoryH, "drive:category_" .. index,
+      trim(category.label, math.max(1, width - 2)), nil, active, COLORS.activeBg, COLORS.panel)
+    car.driveBoxes["category_" .. index] = {
+      x1 = layout.centerX + x - 1, y1 = y0,
+      x2 = layout.centerX + x + width - 2, y2 = y0 + categoryH - 1
     }
   end
 
-  local controls = {
-    { "standard", "STANDARD", "MODE", car.state.mode == "standard", colors.lightBlue },
-    { "sport", "SPORT", "MODE", car.state.mode == "sport", colors.orange },
-    { "sport_plus", "SPORT+", "MODE", car.state.mode == "sport_plus", colors.red },
-    { "clutch", "CLUTCH", "W / S", car.state.clutch, colors.lime },
-    { "reverse", "REVERSE", "S", car.state.reverse, colors.orange },
-    { "front_drive", "FRONT DRIVE", car.state.frontDriveOff and "OFF" or "ON", car.state.frontDriveOff, colors.red },
-    { "drive_engine", "DRIVE ENGINE", car.state.driveEngineOff and "OFF" or "ON", car.state.driveEngineOff, colors.red },
-    { "work_engine", "SHOP ENGINE", car.state.workshopEngineOff and "OFF" or "ON", car.state.workshopEngineOff, colors.red },
-    { "boost", "SHOP BOOST", car.state.workshopBoost and "ON" or "OFF", car.state.workshopBoost, colors.orange },
-    { "headlights", "HEADLIGHTS", "L", car.state.lighting == "headlights", colors.lightBlue },
-    { "left", "LEFT SIGNAL", "Z", car.state.lighting == "left", colors.yellow },
-    { "right", "RIGHT SIGNAL", "C", car.state.lighting == "right", colors.yellow },
-    { "hazard", "HAZARD", "X", car.state.lighting == "hazard", colors.red },
-    { "heading", "PORT HEADING", car.state.portHeading:upper(), false, colors.lightBlue }
-  }
-  for index = 1, #controls do
-    local control = controls[index]
-    local column = ((index - 1) % columns) + 1
-    local row = math.floor((index - 1) / columns) + 1
-    addControl(control[1], column, row, control[2], control[3], control[4], control[5])
+  local category = car.driveCategories[categoryIndex]
+  local controls = groups[category.id] or {}
+  category.itemCount = #controls
+  local contentY = y0 + categoryH + 1
+  local buttonH = layout.h >= 14 and 2 or 1
+  local rowGap = 1
+  local scrollW = layout.centerW >= 16 and 3 or 2
+  local contentW = math.max(1, layout.centerW - scrollW - 2)
+  local visibleRows = math.max(1, math.floor((layout.h - contentY + 1 + rowGap) / (buttonH + rowGap)))
+  local visibleSlots = visibleRows
+  car.ui.driveVisibleSlots = visibleSlots
+  car.ui.driveColumns = 1
+  local maxOffset = math.max(0, #controls - visibleSlots)
+  car.ui.driveScrollOffset = clamp(tonumber(car.ui.driveScrollOffset) or 0, 0, maxOffset)
+  local first = car.ui.driveScrollOffset + 1
+
+  for slot = 1, visibleSlots do
+    local control = controls[first + slot - 1]
+    if not control then break end
+    local y = contentY + (slot - 1) * (buttonH + rowGap)
+    local line1 = trim(control[2], math.max(1, contentW - 2))
+    local line2 = buttonH > 1 and trim(control[3] or "", math.max(1, contentW - 2)) or nil
+    car.drawAnimatedButton(centerWin, 1, y, contentW, buttonH, "drive:" .. control[1],
+      line1, line2, control[4], control[5] or colors.lime, COLORS.panel)
+    car.driveBoxes[control[1]] = {
+      x1 = layout.centerX, y1 = y,
+      x2 = layout.centerX + contentW - 1, y2 = y + buttonH - 1
+    }
   end
 
-  local controlRows = math.ceil(#controls / columns)
-  local statusY = y0 + controlRows * (buttonH + gapY)
-  if statusY <= layout.h then
-    local portStatus = car.devices.portName and ("Port: " .. car.devices.portName) or "Port: not found"
-    writeAt(centerWin, 2, statusY, trim(portStatus, layout.centerW - 2), car.devices.portName and COLORS.fg or colors.red, COLORS.bg)
-  end
-  if statusY + 1 <= layout.h then
-    local keyboardStatus = car.devices.keyboardName and ("Keyboard: " .. car.devices.keyboardName) or "Keyboard: not found"
-    writeAt(centerWin, 2, statusY + 1, trim(car.devices.error or keyboardStatus, layout.centerW - 2), car.devices.error and colors.red or COLORS.fg, COLORS.bg)
-  end
-  if statusY + 2 <= layout.h then
-    local secondaryStatus = car.devices.secondaryPortName and ("Port 2: " .. car.devices.secondaryPortName) or "Port 2: not connected"
-    writeAt(centerWin, 2, statusY + 2, trim(secondaryStatus, layout.centerW - 2), car.devices.secondaryPortName and COLORS.fg or colors.red, COLORS.bg)
-  end
+  local scrollX = layout.centerW - scrollW + 1
+  local downY = math.max(contentY, layout.h - buttonH + 1)
+  car.drawAnimatedButton(centerWin, scrollX, contentY, scrollW, buttonH, "drive:scroll_up", "^", nil,
+    car.ui.driveScrollOffset > 0, COLORS.activeBg, COLORS.panel)
+  car.drawAnimatedButton(centerWin, scrollX, downY, scrollW, buttonH, "drive:scroll_down", "v", nil,
+    car.ui.driveScrollOffset < maxOffset, COLORS.activeBg, COLORS.panel)
+  car.driveBoxes.scroll_up = {
+    x1 = layout.centerX + scrollX - 1, y1 = contentY,
+    x2 = layout.centerX + scrollX + scrollW - 2, y2 = contentY + buttonH - 1
+  }
+  car.driveBoxes.scroll_down = {
+    x1 = layout.centerX + scrollX - 1, y1 = downY,
+    x2 = layout.centerX + scrollX + scrollW - 2, y2 = downY + buttonH - 1
+  }
 end
 
 function car.drawMusic(y0)
@@ -4387,13 +4449,13 @@ function car.drawMap(y0)
   elseif not status and car.map.autoPilotArmed then
     status = "SET DESTINATION - TAP THE ROAD"
   elseif not status and car.routePoints() then
-    status = "ROUTE READY - PRESS START"
+    status = "ROUTE READY - PRESS AUTO"
   elseif not status and car.map.destination then
-    status = "DESTINATION SET - PRESS START"
+    status = "DESTINATION SET - PRESS AUTO"
   elseif not status and car.map.notice then
     status = car.map.notice
   elseif not status then
-    status = "PRESS SET DEST, TAP MAP, THEN PRESS START"
+    status = "TAP MAP TO SET DESTINATION"
   end
   local mapX1 = 1
   local mapY1 = math.min(2, layout.h)
@@ -4429,10 +4491,8 @@ function car.drawMap(y0)
   end
 
   local buttonH = layout.h >= 18 and 2 or 1
-  local autoH = layout.h >= 18 and 3 or 2
   local gap = 1
-  local autoY = 1
-  local zoomY = autoY + autoH + gap
+  local zoomY = 1
   local centerY = zoomY + buttonH + gap
   local rotationY = centerY + buttonH + gap
   local upY = rotationY + buttonH + gap
@@ -4442,8 +4502,6 @@ function car.drawMap(y0)
   local thirdW = math.max(1, math.floor((controlW - splitGap * 2) / 3))
   local rightThirdW = math.max(1, controlW - thirdW * 2 - splitGap * 2)
 
-  car.drawMapControl("autopilot", "Auto Pilot", 1, autoY, controlW, autoH,
-    car.map.autoPilotArmed or car.autopilot.enabled)
   car.drawMapControl("zoom_out", "-", 1, zoomY, halfW, buttonH, false)
   car.drawMapControl("zoom_in", "+", halfW + splitGap + 1, zoomY,
     controlW - halfW - splitGap, buttonH, false)
@@ -4754,6 +4812,24 @@ function car.suspensionControlAt(mx, my)
 end
 
 function car.handleDriveControl(id)
+  local categoryIndex = tostring(id or ""):match("^category_(%d+)$")
+  if categoryIndex then
+    car.ui.driveCategoryIndex = clamp(tonumber(categoryIndex) or 1, 1, #car.driveCategories)
+    car.ui.driveScrollOffset = 0
+    return true
+  end
+  if id == "scroll_up" or id == "scroll_down" then
+    local direction = id == "scroll_up" and -1 or 1
+    local columns = math.max(1, tonumber(car.ui.driveColumns) or 1)
+    local category = car.driveCategories[clamp(tonumber(car.ui.driveCategoryIndex) or 1, 1, #car.driveCategories)]
+    local itemCount = category and tonumber(category.itemCount) or 0
+    local maxOffset = math.max(0, itemCount - math.max(1, tonumber(car.ui.driveVisibleSlots) or 1))
+    car.ui.driveScrollOffset = clamp((tonumber(car.ui.driveScrollOffset) or 0) + direction * columns, 0, maxOffset)
+    return true
+  end
+  if id == "autopilot" then
+    return car.handleMapAutopilotControl()
+  end
   if car.autopilot.enabled then car.stopAutopilot("MANUAL") end
   car.bumpAnimation("drive:" .. tostring(id))
   car.bumpAnimation("home:" .. tostring(id))
@@ -4807,6 +4883,34 @@ function car.handleDriveControl(id)
   car.applyOutputs()
   car.markVehicleStateDirty()
   return true
+end
+
+function car.handleScroll(direction)
+  direction = tonumber(direction) or 0
+  if direction == 0 then return false end
+  local selectedTab = tabs and tabs[activeTab] or nil
+  local pageId = selectedTab and selectedTab.id or ""
+  if pageId == "drive" then
+    return car.handleDriveControl(direction < 0 and "scroll_up" or "scroll_down")
+  end
+  if pageId == "map" then
+    if direction < 0 then
+      car.map.zoomIndex = math.max(1, car.map.zoomIndex - 1)
+    else
+      car.map.zoomIndex = math.min(#car.map.zooms, car.map.zoomIndex + 1)
+    end
+    car.map.lastUpdate = -1e9
+    car.map.refreshRequested = true
+    car.buildMapView(curPos or car.vehicleWorldPosition())
+    car.markVehicleStateDirty()
+    return true
+  end
+  if pageId == "music" and car.music then
+    local pageCount = math.max(1, math.ceil(#car.music:visibleTracks() / 4))
+    car.music.page = clamp((tonumber(car.music.page) or 1) + (direction < 0 and -1 or 1), 1, pageCount)
+    return true
+  end
+  return false
 end
 
 local function handleClick(mx, my)
@@ -4877,7 +4981,7 @@ local function handleClick(mx, my)
     car.setMapFeedback("BUILDING ROUTE", 5)
     car.markVehicleStateDirty()
     car.safeUpdateMap(true)
-    if car.routePoints() then car.setMapFeedback("ROUTE READY - PRESS START", 6)
+    if car.routePoints() then car.setMapFeedback("ROUTE READY - PRESS AUTO", 6)
     else car.setMapFeedback("ROUTE UNAVAILABLE", 6) end
     return true
   end
@@ -5110,7 +5214,14 @@ function car.updateHardware()
   car.updateShipLoad(false)
   car.updateAutopilot()
   local selectedTab = tabs and tabs[activeTab] or nil
-  if not car.autopilot.enabled and selectedTab and selectedTab.id == "map" then car.safeUpdateMap(false) end
+  local livePosition = curPos
+  if not livePosition and ((selectedTab and selectedTab.id == "map") or car.autopilot.enabled) then
+    livePosition = car.vehicleWorldPosition()
+  end
+  if type(livePosition) == "table" and car.map.view then car.updateMapPosition(livePosition) end
+  if selectedTab and selectedTab.id == "map" then
+    if not car.autopilot.enabled then car.safeUpdateMap(false) end
+  end
   local now = os.clock()
   if car.pointer.down and now - car.pointer.lastSeen > 0.8 then
     car.pointer.down = false
@@ -5339,6 +5450,13 @@ local function main()
 
     elseif ev == "mouse_up" then
       if car.handleTouchEvent(b, c, false, true) then redraw() end
+
+    elseif ev == "mouse_scroll" then
+      if car.handleScroll(a) then redraw() end
+
+    elseif ev == "tm_monitor_mouse_scroll" or ev == "tm_monitor_scroll" then
+      local direction = tonumber(b) or tonumber(a) or 0
+      if car.handleScroll(direction) then redraw() end
 
     elseif ev == "key" then
       if car.handleKey(a, true, b == true) then redraw() end

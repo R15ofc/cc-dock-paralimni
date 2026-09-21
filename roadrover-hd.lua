@@ -545,7 +545,7 @@ return function(car, context)
       local requestedWidth, requestedHeight = configuredResolution()
       local resolutionApplied = false
       if type(gpu.setResolution) == "function" then
-        local resolutionOK, result = pcall(gpu.setResolution, requestedWidth, requestedHeight)
+        local resolutionOK, result = pcall(gpu.setResolution, requestedWidth, requestedHeight, "fit")
         resolutionApplied = resolutionOK and result ~= false
       end
       local requestedDensity = configuredDensity()

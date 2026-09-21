@@ -258,9 +258,11 @@ local function addMap(commands, map, menuX, width, height)
 end
 
 local function addPanel(commands, dashboard, frame, width, height, menuX, menuWidth)
+  local rightEdge = math.max(0, width - 1)
+  local bottomEdge = math.max(0, height - 1)
   local topLeft = menuX + height * 0.12
   local bottomLeft = menuX - height * 0.12
-  polygon(commands, { topLeft,0, width,0, width,height, bottomLeft,height }, "#F8F8F9F5")
+  polygon(commands, { topLeft,0, rightEdge,0, rightEdge,bottomEdge, bottomLeft,bottomEdge }, "#F8F8F9F5")
 
   local function panelLeftAt(y)
     return topLeft + (bottomLeft - topLeft) * clamp(y / height, 0, 1)
@@ -278,7 +280,7 @@ local function addPanel(commands, dashboard, frame, width, height, menuX, menuWi
     y, pixelHeight = y + insetY, pixelHeight - insetY * 2
     local leftTop = panelLeftAt(y) + insetX
     local leftBottom = panelLeftAt(y + pixelHeight) + insetX
-    local rightTop = width - insetX
+    local rightTop = rightEdge - insetX
     local rightBottom = rightTop
     local progress = clamp(item.progress or 0, 0, 1)
     if progress > 0.01 then rightBottom = rightTop + (leftBottom - leftTop) end
@@ -372,9 +374,6 @@ end
 local function buttonVisible(page, id)
   if page == "map" then return id:find("^map:") ~= nil end
   if page == "drive" then return id:find("^drive:") ~= nil end
-  if page == "vehicle" then
-    return id:find("^action:") ~= nil or id:find("^info:") ~= nil or id:find("^actions:") ~= nil
-  end
   if page == "music" then return id:find("^music:") ~= nil end
   if page == "settings" then return id:find("^settings:") ~= nil end
   return false
