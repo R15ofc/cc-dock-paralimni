@@ -262,6 +262,10 @@ local function addPanel(commands, dashboard, frame, width, height, menuX, menuWi
   local bottomLeft = menuX - height * 0.12
   polygon(commands, { topLeft,0, width,0, width,height, bottomLeft,height }, "#F8F8F9F5")
 
+  local function panelLeftAt(y)
+    return topLeft + (bottomLeft - topLeft) * clamp(y / height, 0, 1)
+  end
+
   local startY = tonumber(dashboard.menuStartY) or 1
   local itemHeight = tonumber(dashboard.menuHeight) or 2
   local gap = tonumber(dashboard.menuGap) or 1
@@ -271,14 +275,27 @@ local function addPanel(commands, dashboard, frame, width, height, menuX, menuWi
       tonumber(dashboard.rightX) or 1, logicalY,
       tonumber(dashboard.rightWidth) or 12, itemHeight)
     local insetX, insetY = math.max(18, height * 0.022), math.max(4, height * 0.008)
-    x, y = x + insetX, y + insetY
-    itemWidth, pixelHeight = itemWidth - insetX * 2, pixelHeight - insetY * 2
+    y, pixelHeight = y + insetY, pixelHeight - insetY * 2
+    local leftTop = panelLeftAt(y) + insetX
+    local leftBottom = panelLeftAt(y + pixelHeight) + insetX
+    local rightTop = width - insetX
+    local rightBottom = rightTop
     local progress = clamp(item.progress or 0, 0, 1)
-    rect(commands, x, y, itemWidth, pixelHeight, pixelHeight / 2,
-      mix("#D0FFFFFC", "#FF111311", progress))
-    text(commands, x + itemWidth / 2, y + pixelHeight / 2, item.label,
+    if progress > 0.01 then rightBottom = rightTop + (leftBottom - leftTop) end
+    local shape = { leftTop,y, rightTop,y, rightBottom,y + pixelHeight, leftBottom,y + pixelHeight }
+    if progress > 0.01 then
+      local shadowOffset = math.max(3, height * 0.007)
+      polygon(commands, {
+        leftTop,y + shadowOffset, rightTop,y + shadowOffset,
+        rightBottom,y + pixelHeight + shadowOffset, leftBottom,y + pixelHeight + shadowOffset
+      }, argb(0, 0, 0, math.floor(34 * progress)))
+    end
+    polygon(commands, shape, mix("#D8FFFFFC", "#FF111311", progress))
+    local centerX = (leftTop + leftBottom + rightTop + rightBottom) / 4
+    text(commands, centerX, y + pixelHeight / 2, item.label,
       math.max(23, math.min(pixelHeight * 0.42, height * 0.038)),
-      mix("#FF191B18", "#FFFFFEFA", progress), "center", "middle", itemWidth - 28)
+      mix("#FF191B18", "#FFFFFEFA", progress), "center", "middle",
+      math.max(1, math.min(rightTop, rightBottom) - math.max(leftTop, leftBottom) - 28))
   end
 end
 
