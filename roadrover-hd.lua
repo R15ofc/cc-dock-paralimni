@@ -645,7 +645,7 @@ return function(car, context)
     local gpu = car.devices.gpu
     if not gpu then return nativeFailure("GPU peripheral missing") end
     if type(gpu.renderScene) ~= "function" then
-      return nativeFailure("GPU renderScene missing; restart server with Tweaked Tweaks 1.13.0")
+      return nativeFailure("GPU renderScene missing; restart server with Tweaked Tweaks 1.13.1")
     end
     if not loadSceneBuilder() then return nativeFailure(sceneBuilderError) end
     lastNativeError = nil
